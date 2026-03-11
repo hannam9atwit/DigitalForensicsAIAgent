@@ -31,6 +31,7 @@ class AnomalyEngine:
                     "path": e.get("path"),
                     "size": size,
                     "timestamp": e.get("timestamp"),
+                    "reason": "File size is unusually large compared to typical NTFS system files.",
                     "details": e
                 })
 
@@ -57,6 +58,7 @@ class AnomalyEngine:
                         "path": path,
                         "extension": ext,
                         "timestamp": e.get("timestamp"),
+                        "reason": "File extension appears only once in the dataset — unusual or uncommon file type.",
                         "details": e
                     })
 
@@ -85,6 +87,7 @@ class AnomalyEngine:
                     "start": start,
                     "end": start + window,
                     "event_count": count,
+                    "reason": f"{count} filesystem events occurred within {window} seconds — possible mass file creation or system initialization.",
                     "details": {"timestamps": timestamps[i:j]}
                 })
             i += 1
@@ -98,6 +101,7 @@ class AnomalyEngine:
             self._safe_append(anomalies,{
                 "type": "downloads_without_disk_activity",
                 "severity": 1,
+                "reason": "Browser downloads detected but no corresponding disk activity — file may have been deleted or stored elsewhere.",
                 "details": {"downloads": browser_downloads}
             })
 

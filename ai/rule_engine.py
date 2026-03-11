@@ -28,6 +28,7 @@ class RuleEngine:
                     "severity": 2,
                     "path": path,
                     "timestamp": e.get("timestamp"),
+                    "reason": "File was deleted from a user-accessible directory.",
                     "details": e
                 })
 
@@ -41,6 +42,7 @@ class RuleEngine:
                     "severity": 3,
                     "path": e.get("path"),
                     "timestamp": e.get("timestamp"),
+                    "reason": "File exists in $OrphanFiles, indicating lost or unlinked MFT entries.",
                     "details": e
                 })
 
@@ -55,6 +57,7 @@ class RuleEngine:
                     "severity": 3,
                     "path": path,
                     "timestamp": e.get("timestamp"),
+                    "reason": "File contains an NTFS alternate data stream (ADS), often used for hiding data.",
                     "details": e
                 })
 
@@ -68,8 +71,9 @@ class RuleEngine:
                 self._safe_append(findings,{
                     "type": "timestamp_anomaly",
                     "severity": 2,
-                    "path": e.get("path"),
+                    "path": e["path"],
                     "timestamp": m,
+                    "reason": "File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.",
                     "details": e
                 })
 
@@ -83,9 +87,10 @@ class RuleEngine:
                 self._safe_append(findings,{
                     "type": "large_badclus_stream",
                     "severity": 4,
-                    "path": path,
-                    "size": size,
-                    "timestamp": e.get("timestamp"),
+                    "path": e["path"],
+                    "size": e["size"],
+                    "timestamp": e["timestamp"],
+                    "reason": "Unusually large $BadClus:$Bad stream — may indicate anti-forensic manipulation of bad clusters.",
                     "details": e
                 })
 
@@ -106,8 +111,9 @@ class RuleEngine:
                         "type": "deleted_directory_with_live_children",
                         "severity": 3,
                         "directory": d["path"],
-                        "child": child_path,
-                        "timestamp": d.get("timestamp"),
+                        "child": e["path"],
+                        "timestamp": d["timestamp"],
+                        "reason": "Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.",
                         "details": {"directory": d, "child": e}
                     })
 

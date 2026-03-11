@@ -10,69 +10,87 @@ Findings: 26
 
 Anomalies: 32
 
-## Findings
+## Findings by Severity
 
-- **deleted_user_file**: /Orion (deleted)
-- **deleted_user_file**: /Lyra/Sheliak.txt (deleted)
-- **deleted_user_file**: /Lyra/Vega.txt (deleted)
-- **deleted_user_file**: /Lyra/Sulafat.txt (deleted)
-- **deleted_user_file**: /Lyra ($FILE_NAME) (deleted)
-- **deleted_user_file**: /Lyra/Sheliak.txt ($FILE_NAME) (deleted)
-- **deleted_user_file**: /Lyra/Vega.txt ($FILE_NAME) (deleted)
-- **deleted_user_file**: /Lyra/Sulafat.txt ($FILE_NAME) (deleted)
-- **deleted_user_file**: /Lyra (deleted)
-- **orphaned_file**: /$OrphanFiles
-- **timestamp_anomaly**: /Cygnus/Albireo.txt
-- **timestamp_anomaly**: /Cygnus/Deneb.txt
-- **timestamp_anomaly**: /Cygnus/Sadr.txt
-- **timestamp_anomaly**: /Orion/Betelguese.txt
-- **timestamp_anomaly**: /Orion/Mintaka.txt
-- **timestamp_anomaly**: /Orion/Rigel.txt
-- **timestamp_anomaly**: /Lyra/Sheliak.txt (deleted)
-- **timestamp_anomaly**: /Lyra/Vega.txt (deleted)
-- **timestamp_anomaly**: /Lyra/Sulafat.txt (deleted)
-- **large_badclus_stream**: /$BadClus:$Bad
-- **deleted_directory_with_live_children**: 
-- **deleted_directory_with_live_children**: 
-- **deleted_directory_with_live_children**: 
-- **deleted_directory_with_live_children**: 
-- **deleted_directory_with_live_children**: 
-- **deleted_directory_with_live_children**: 
+### Critical Severity
 
-## Anomalies
+- **large_badclus_stream** — Unusually large $BadClus:$Bad stream — may indicate anti-forensic manipulation of bad clusters.
 
-- **large_file**: /$BadClus:$Bad
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
-- **activity_burst**: 
+### High Severity
+
+- **orphaned_file** — File exists in $OrphanFiles, indicating lost or unlinked MFT entries.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+
+### Medium Severity
+
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+
+### Low Severity
+
+_No findings in this category._
+
+## Findings by Severity
+
+### Critical Severity
+
+- **large_badclus_stream** — Unusually large $BadClus:$Bad stream — may indicate anti-forensic manipulation of bad clusters.
+
+### High Severity
+
+- **orphaned_file** — File exists in $OrphanFiles, indicating lost or unlinked MFT entries.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+- **deleted_directory_with_live_children** — Directory was deleted but contains active child entries — possible incomplete deletion or anti-forensics.
+
+### Medium Severity
+
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **timestamp_anomaly** — File timestamps are inconsistent (mtime < crtime), suggesting possible timestomping.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+- **deleted_user_file** — File was deleted from a user-accessible directory.
+
+### Low Severity
+
+_No findings in this category._
 
 ## Unified Timeline
 

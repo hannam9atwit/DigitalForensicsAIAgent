@@ -218,6 +218,10 @@ class MainWindow(QMainWindow):
         self.report_view = QTextBrowser()
         report_layout.addWidget(self.report_view)
 
+        # AI Narrative tab
+        self.narrative_view = QTextBrowser()
+        self.tabs.addTab(self.narrative_view, "AI Narrative")
+
         # Open Report button
         self.open_report_button = QPushButton("Open Report in Folder")
         self.open_report_button.clicked.connect(self.open_report_location)
@@ -298,7 +302,12 @@ class MainWindow(QMainWindow):
                 ts = str(raw_ts)
 
             src = event["source"]
-            details = "\n".join(f"{k}: {v}" for k, v in event.items())
+            details = (
+                f"path: {event.get('path', '')}\n"
+                f"inode: {event.get('inode', '')}\n"
+                f"mode: {event.get('mode', '')}\n"
+                f"size: {event.get('size', '')}\n"
+            )
 
             self.timeline_table.setItem(row, 0, QTableWidgetItem(ts))
             self.timeline_table.setItem(row, 1, QTableWidgetItem(src))
@@ -307,14 +316,56 @@ class MainWindow(QMainWindow):
         # -----------------------------
         # Populate Findings Tab
         # -----------------------------
-        findings_text = ""
+        groups = {4: [], 3: [], 2: [], 1: []}
         for f in analysis["findings"]:
-            reason = f.get("reason") or f.get("path") or "(no details)"
-            severity = f.get("severity", 0)
-            findings_text += f"• {f['type']} (severity {severity}): {reason}\n"
-        if not findings_text:
-            findings_text = "No findings detected."
-        self.findings_view.setText(findings_text)
+            sev = f.get("severity", 1)
+            groups.setdefault(sev, []).append(f)
+
+        html = "<h2>Findings by Severity</h2>"
+
+        severity_labels = {
+            4: "Critical",
+            3: "High",
+            2: "Medium",
+            1: "Low"
+        }
+
+        for sev in [4, 3, 2, 1]:
+            color = self.severity_color(sev)
+            label = severity_labels[sev]
+
+            html += (
+                f"<details style='margin-bottom:10px;'>"
+                f"<summary style='font-size:16px; font-weight:bold; "
+                f"background-color:{color}; padding:6px; border-radius:4px;'>"
+                f"{label} Severity ({len(groups[sev])})"
+                f"</summary>"
+            )
+
+            if not groups[sev]:
+                html += "<p style='margin-left:20px;'>No findings in this category.</p>"
+            else:
+                for f in groups[sev]:
+                    reason = f.get('reason') or f.get('path') or "(no details)"
+                    html += (
+                        f"<p style='margin-left:20px;'>"
+                        f"<b>{f['type']}</b>: {reason}"
+                        f"</p>"
+                    )
+
+            html += "</details>"
+
+        self.findings_view.setHtml(html)
+
+        # -----------------------------
+        # Populate AI Narrative Tab
+        # -----------------------------
+        narrative = analysis.get("narrative", "No narrative available.")
+
+        # Convert newlines to HTML line breaks for readability
+        narrative_html = narrative.replace("\n", "<br>")
+
+        self.narrative_view.setHtml(narrative_html)
 
         # -----------------------------
         # Populate Report Tab
@@ -420,7 +471,18 @@ class MainWindow(QMainWindow):
             self.setStyleSheet(light_stylesheet)
         else:
             # Reset to system theme (dark on your machine)
-            self.setStyleSheet("")
+            self.setStyleSheet("""
+                QTextBrowser {
+                    padding: 8px;
+                    font-size: 14px;
+                }
+                QTableWidget {
+                    font-size: 13px;
+                }
+                QTableWidget::item {
+                    padding: 4px;
+                }
+            """)
 
     def open_report_location(self):
         if not hasattr(self, "last_report_path"):
@@ -474,11 +536,18 @@ class MainWindow(QMainWindow):
         # Enable Run button
         self.run_button.setEnabled(True)
 
+    def severity_color(self, sev):
+        return {
+            4: "#ff4d4d",  # Critical - red
+            3: "#ff944d",  # High - orange
+            2: "#ffd24d",  # Medium - yellow
+            1: "#b3ff66"  # Low - green
+        }.get(sev, "#ffffff")
 
-def launch_main_window(app, splash):
-    from gui.main_window import MainWindow
-    window = MainWindow()
-    window.show()
-    splash.finish(window)
+    def launch_main_window(app, splash):
+        from gui.main_window import MainWindow
+        window = MainWindow()
+        window.show()
+        splash.finish(window)
 
 
