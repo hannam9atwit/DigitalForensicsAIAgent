@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
                 ts = str(raw_ts)
 
             src = event["source"]
-            details = str(event["details"])
+            details = "\n".join(f"{k}: {v}" for k, v in event.items())
 
             self.timeline_table.setItem(row, 0, QTableWidgetItem(ts))
             self.timeline_table.setItem(row, 1, QTableWidgetItem(src))
@@ -309,7 +309,9 @@ class MainWindow(QMainWindow):
         # -----------------------------
         findings_text = ""
         for f in analysis["findings"]:
-            findings_text += f"• {f['type']}: {f['reason']}\n"
+            reason = f.get("reason") or f.get("path") or "(no details)"
+            severity = f.get("severity", 0)
+            findings_text += f"• {f['type']} (severity {severity}): {reason}\n"
         if not findings_text:
             findings_text = "No findings detected."
         self.findings_view.setText(findings_text)

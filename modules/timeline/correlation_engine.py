@@ -17,12 +17,9 @@ class TimelineCorrelationEngine:
         # -----------------------------
         for e in disk_events:
             parsed = self._parse_disk_event(e)
-            if parsed:
-                unified.append({
-                    "timestamp": parsed["timestamp"],
-                    "source": "disk",
-                    "details": parsed
-                })
+            if isinstance(parsed, dict):
+                parsed["source"] = "disk"
+                unified.append(parsed)
 
         # -----------------------------
         # Add browser visit events

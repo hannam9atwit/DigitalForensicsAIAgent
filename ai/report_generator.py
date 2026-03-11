@@ -26,7 +26,11 @@ class ReportGenerator:
         # Summary
         # ---------------------------------------
         lines.append("## Executive Summary\n")
-        lines.append(summary + "\n")
+        if isinstance(summary, dict):
+            lines.append(f"Findings: {summary.get('finding_count', 0)}\n")
+            lines.append(f"Anomalies: {summary.get('anomaly_count', 0)}\n")
+        else:
+            lines.append(str(summary) + "\n")
 
         # ---------------------------------------
         # Findings
@@ -34,7 +38,8 @@ class ReportGenerator:
         lines.append("## Findings\n")
         if findings:
             for f in findings:
-                lines.append(f"- **{f['type']}**: {f['reason']}")
+                reason = f.get("reason", f.get("path", ""))
+                lines.append(f"- **{f['type']}**: {reason}")
         else:
             lines.append("No findings detected.")
         lines.append("")
@@ -45,7 +50,8 @@ class ReportGenerator:
         lines.append("## Anomalies\n")
         if anomalies:
             for a in anomalies:
-                lines.append(f"- **{a['type']}**: {a['reason']}")
+                reason = a.get("reason", a.get("path", ""))
+                lines.append(f"- **{a['type']}**: {reason}")
         else:
             lines.append("No anomalies detected.")
         lines.append("")
@@ -55,9 +61,9 @@ class ReportGenerator:
         # ---------------------------------------
         lines.append("## Unified Timeline\n")
         for event in timeline:
-            ts = event["timestamp"]
-            src = event["source"]
-            details = event["details"]
+            ts = event.get("timestamp")
+            src = event.get("source")
+            details = event
             lines.append(f"- `{ts}` — **{src}** — {details}")
         lines.append("")
 
