@@ -63,27 +63,17 @@ class ReportGenerator:
             lines.append("")
 
         # ---------------------------------------
-        # Findings (Grouped by Severity)
+        # Anomalies
         # ---------------------------------------
-        lines.append("## Findings by Severity\n")
+        lines.append("## Anomalies\n")
 
-        groups = self.group_findings_by_severity(findings)
-
-        for sev in [4, 3, 2, 1]:
-            label = self.SEVERITY_LABELS.get(sev, f"Severity {sev}")
-            lines.append(f"### {label} Severity\n")
-
-            if not groups.get(sev):
-                lines.append("_No findings in this category._\n")
-                continue
-
-            # Sort by timestamp
-            sorted_group = sorted(groups[sev], key=lambda f: f.get("timestamp", 0))
-
-            for f in sorted_group:
-                reason = f.get("reason") or f.get("path") or "(no details)"
-                lines.append(f"- **{f['type']}** — {reason}")
-
+        if not anomalies:
+            lines.append("_No anomalies detected._\n")
+        else:
+            for a in sorted(anomalies, key=lambda x: x.get("severity", 1), reverse=True):
+                reason = a.get("reason") or a.get("path") or "(no details)"
+                sev_label = self.SEVERITY_LABELS.get(a.get("severity", 1), "Low")
+                lines.append(f"- **[{sev_label}] {a['type']}** — {reason}")
             lines.append("")
 
         # ---------------------------------------

@@ -52,7 +52,7 @@ class AnomalyEngine:
             if "." in path and not path.startswith("/$"):
                 ext = path.rsplit(".", 1)[-1].lower()
                 if ext in rare_exts:
-                    self._safe_append(anomalies,{
+                    self._safe_append(anomalies, {
                         "type": "rare_extension",
                         "severity": 1,
                         "path": path,
@@ -64,12 +64,18 @@ class AnomalyEngine:
 
         # ---------------------------------------------------------
         # ANOMALY 3 — Activity bursts (many events in short time)
+        #
+        # FIX: Previously i incremented by 1 every iteration, causing
+        # every single timestamp to be treated as a burst window start.
+        # This produced O(n²) duplicate anomalies on real disk images.
+        # Now we advance i to j after processing each window, so each
+        # burst cluster is only reported once.
         # ---------------------------------------------------------
         timestamps = sorted(
             [e.get("timestamp") for e in disk_events if isinstance(e.get("timestamp"), int)]
         )
 
-        window = 60  # seconds
+        window = 60     # seconds
         threshold = 20  # events per window
 
         i = 0
@@ -81,7 +87,7 @@ class AnomalyEngine:
                 j += 1
             count = j - i
             if count >= threshold:
-                self._safe_append(anomalies,{
+                self._safe_append(anomalies, {
                     "type": "activity_burst",
                     "severity": 2,
                     "start": start,
@@ -90,15 +96,15 @@ class AnomalyEngine:
                     "reason": f"{count} filesystem events occurred within {window} seconds — possible mass file creation or system initialization.",
                     "details": {"timestamps": timestamps[i:j]}
                 })
-            i += 1
+                i = j  # skip past the entire burst window — don't re-evaluate from i+1
+            else:
+                i += 1
 
         # ---------------------------------------------------------
-        # ANOMALY 4 — Downloads with no obvious disk counterpart (placeholder)
+        # ANOMALY 4 — Downloads with no obvious disk counterpart
         # ---------------------------------------------------------
-        # Later you can correlate browser_downloads with disk paths.
-        # For now, we just flag presence of downloads when disk is quiet.
         if browser_downloads and not disk_events:
-            self._safe_append(anomalies,{
+            self._safe_append(anomalies, {
                 "type": "downloads_without_disk_activity",
                 "severity": 1,
                 "reason": "Browser downloads detected but no corresponding disk activity — file may have been deleted or stored elsewhere.",
