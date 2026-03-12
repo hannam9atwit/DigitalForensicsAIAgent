@@ -1,6 +1,7 @@
 import os
 import subprocess
 import shutil
+import sys
 
 class ToolRunner:
     """
@@ -9,7 +10,7 @@ class ToolRunner:
 
     def __init__(self):
         # Path to project root
-        base_dir = os.path.dirname(os.path.dirname(__file__))
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(__file__)))
         # Path to bundled TSK binaries
         self.tsk_path = os.path.join(base_dir, "bin", "sleuthkit")
 
