@@ -3,8 +3,7 @@
 # Build with:
 #   pyinstaller forensic_agent.spec
 #
-# Output:  dist/ForensicAIAgent/  (folder) or dist/ForensicAIAgent.exe (onefile)
-# We use onedir (not onefile) so startup is fast and the bin/ folder is accessible.
+# Output: dist/ForensicAIAgent/ (onedir mode — faster startup, bin/ folder accessible)
 
 import sys
 import os
@@ -12,7 +11,6 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
-# Collect all submodules for PySide6 (avoids missing plugin errors)
 pyside6_hidden = collect_submodules("PySide6")
 
 a = Analysis(
@@ -20,9 +18,7 @@ a = Analysis(
     pathex=["."],
     binaries=[],
     datas=[
-        # Bundle the SleuthKit binaries
         ("bin/sleuthkit", "bin/sleuthkit"),
-        # Bundle splash / asset images
         ("assets",        "assets"),
     ],
     hiddenimports=[
@@ -65,7 +61,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Strip things we definitely don't use to keep size down
         "tkinter",
         "matplotlib",
         "numpy",
@@ -87,14 +82,14 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    exclude_binaries=True,    # onedir mode — faster startup
+    exclude_binaries=True,
     name="ForensicAIAgent",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,                 # compress with UPX if available
-    console=False,            # no console window on Windows
-    icon="assets/icon.ico",   # replace with your icon path
+    upx=True,
+    console=False,
+    icon=None,  # set to "assets/icon.ico" if you have a .ico file
 )
 
 coll = COLLECT(
