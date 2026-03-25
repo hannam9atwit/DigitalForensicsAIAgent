@@ -12,8 +12,20 @@ def _norm(path: str) -> str:
 class ToolRunner:
 
     def __init__(self):
-        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
+        # sys._MEIPASS is set by PyInstaller to the folder where it extracts
+        # bundled files at runtime. Fall back to the project root when running
+        # from source so both modes work with the same code.
+        if getattr(sys, "frozen", False):
+            base = sys._MEIPASS
+        else:
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
         self.tsk_path = os.path.join(base, "bin", "sleuthkit")
+        print(f"[DEBUG] ToolRunner base     : {base}")
+        print(f"[DEBUG] ToolRunner tsk_path : {self.tsk_path}")
+        print(f"[DEBUG] tsk_path exists     : {os.path.exists(self.tsk_path)}")
+        if os.path.exists(self.tsk_path):
+            print(f"[DEBUG] tsk_path contents   : {os.listdir(self.tsk_path)}")
 
     def _resolve(self, tool_name: str):
         for candidate in [
@@ -21,34 +33,39 @@ class ToolRunner:
             os.path.join(self.tsk_path, tool_name),
         ]:
             if os.path.exists(candidate):
+                print(f"[DEBUG] Resolved {tool_name} -> {candidate}")
                 return candidate
-        return shutil.which(tool_name)
+
+        # Last resort: check system PATH
+        found = shutil.which(tool_name)
+        if found:
+            print(f"[DEBUG] Resolved {tool_name} from PATH -> {found}")
+        else:
+            print(f"[!] Could not resolve tool: {tool_name}")
+            print(f"    Looked in: {self.tsk_path}")
+        return found
 
     def run_tsk(self, cmd_list: list, image_path: str = None) -> dict:
-        """
-        Run a SleuthKit command.
-        image_path is used to:
-          • decide whether to inject -i ewf
-          • normalise the path in cmd_list that matches the image
-        """
         tool      = cmd_list[0]
         tool_path = self._resolve(tool)
 
         if not tool_path:
-            return {"stdout": "", "stderr": f"Tool not found: {tool}", "returncode": -1}
+            return {
+                "stdout":     "",
+                "stderr":     f"Tool not found: {tool} (looked in {self.tsk_path})",
+                "returncode": -1,
+            }
 
         cmd = [tool_path] + cmd_list[1:]
 
-        # Normalise any occurrence of the image path inside the command
-        # (it's always the last positional argument in TSK commands)
         if image_path:
             normed = _norm(image_path)
             cmd = [normed if arg == image_path else arg for arg in cmd]
 
-            # Inject -i ewf for E01 images if not already present
             if self._is_ewf(normed) and "-i" not in cmd:
-                # Insert right after the binary: tool -i ewf [rest...]
                 cmd = [cmd[0], "-i", "ewf"] + cmd[1:]
+
+        print(f"[DEBUG] Running: {' '.join(cmd)}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, shell=False)

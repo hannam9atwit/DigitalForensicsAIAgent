@@ -13,13 +13,21 @@ block_cipher = None
 
 pyside6_hidden = collect_submodules("PySide6")
 
+# Collect all .exe and .dll files from bin/sleuthkit as binaries
+# so PyInstaller copies them as executables, not data blobs.
+import glob
+sleuthkit_binaries = [
+    (f, "bin/sleuthkit")
+    for f in glob.glob("bin/sleuthkit/*")
+    if os.path.isfile(f)
+]
+
 a = Analysis(
     ["gui_main.py"],
     pathex=["."],
-    binaries=[],
+    binaries=sleuthkit_binaries,
     datas=[
-        ("bin/sleuthkit", "bin/sleuthkit"),
-        ("assets",        "assets"),
+        ("assets", "assets"),
     ],
     hiddenimports=[
         *pyside6_hidden,
@@ -88,8 +96,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
-    icon=None,  # set to "assets/icon.ico" if you have a .ico file
+    console=True,   # keep True so errors are visible; set False once confirmed working
+    icon=None,      # set to "assets/icon.ico" if you have a .ico file
 )
 
 coll = COLLECT(
