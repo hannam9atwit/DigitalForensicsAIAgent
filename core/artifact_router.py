@@ -1,16 +1,19 @@
+"""
+core/artifact_router.py
+"""
 import os
 from typing import Dict
 
+
 class ArtifactRouter:
-    """
-    Determines artifact type (disk image vs browser DB) and returns routing info.
-    """
+
+    DISK_EXTENSIONS = {".img", ".dd", ".raw", ".e01", ".ex01", ".s01"}
+    BROWSER_NAMES   = {"history", "history.db", "places.sqlite"}
 
     def route(self, path: str) -> Dict:
-        artifact_type = self._detect_type(path)
         return {
-            "path": path,
-            "artifact_type": artifact_type,
+            "path":          path,
+            "artifact_type": self._detect_type(path),
         }
 
     def _detect_type(self, path: str) -> str:
@@ -18,19 +21,14 @@ class ArtifactRouter:
             return "unknown"
 
         filename = os.path.basename(path).lower()
+        ext      = os.path.splitext(filename)[1].lower()
 
-        # Correct disk image detection
-        if filename.endswith((".img", ".dd", ".raw", ".e01")):
+        if ext in self.DISK_EXTENSIONS:
             return "disk_image"
-
-        # Browser artifacts
-        if filename in ("history", "history.db", "places.sqlite"):
+        if filename in self.BROWSER_NAMES:
             return "browser_history"
-
         if "cookies" in filename:
             return "browser_cookies"
-
         if "downloads" in filename:
             return "browser_downloads"
-
         return "unknown"
