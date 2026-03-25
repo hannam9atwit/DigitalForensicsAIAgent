@@ -1,16 +1,13 @@
 """
 ai/refinement_engine.py
 
-Generates the forensic narrative one section at a time using few-shot prompting.
+LLM integration layer for the forensic narrative engine.
 
-Root cause of previous failure: llama3.1:8b was receiving JSON data and describing
-its structure instead of writing forensic prose. Fix:
-  1. Use llama3.2:3b — smaller but better instruction-following for this task.
-  2. Few-shot prompting — show the model exactly one example of BAD output and one
-     example of GOOD output before asking it to write the section.
-  3. Hard output prefix — end every prompt with "REPORT TEXT:" so the model
-     continues writing the report rather than commenting on the data.
-  4. Strip any preamble the model adds before the actual report text.
+Generates the forensic report one section at a time using few-shot prompting.
+Supports two backends in priority order:
+  1. Ollama (local, llama3.2:3b) — runs fully offline after first setup
+  2. Anthropic Claude API — used when ANTHROPIC_API_KEY is set
+  3. Deterministic fallback — used when no LLM is available
 """
 
 import os
@@ -20,7 +17,7 @@ import urllib.request
 from collections import Counter
 
 
-# ── Shared persona — prepended to every call ──────────────────────────────────
+# Shared persona prepended to every LLM call
 _PERSONA = (
     "You are a digital forensics examiner writing a formal investigation report. "
     "IMPORTANT RULES:\n"
@@ -33,7 +30,7 @@ _PERSONA = (
     "- Every sentence must state a forensic conclusion, not describe the data."
 )
 
-# ── Few-shot example injected into every section prompt ──────────────────────
+# Few-shot example injected into every section prompt
 _FEW_SHOT = """
 EXAMPLE OF WRONG OUTPUT (never do this):
 "This is a JSON array of objects. Each object has properties: type, severity, reason, timestamp. There are 21 objects in the array. If you would like me to help process this data, feel free to ask."
@@ -48,10 +45,10 @@ Now write the section below. Begin writing the report immediately after "REPORT 
 class RefinementEngine:
 
     OLLAMA_URL   = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "llama3.2:3b"   # 3b follows output-format instructions more reliably
+    OLLAMA_MODEL = "llama3.2:3b"
 
     ANTHROPIC_URL   = "https://api.anthropic.com/v1/messages"
-    ANTHROPIC_MODEL = "claude-sonnet-4-6"
+    ANTHROPIC_MODEL = "claude-sonnet-4-5"
 
     def __init__(self):
         self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -116,7 +113,7 @@ class RefinementEngine:
             "prompt": full_prompt,
             "stream": False,
             "options": {
-                "temperature": 0.15,   # very low = factual, no hallucination
+                "temperature": 0.15,
                 "num_predict": 600,
                 "stop": ["---", "NOTE:", "IMPORTANT:", "If you"],
             },
@@ -168,10 +165,8 @@ class RefinementEngine:
                 body = json.loads(resp.read().decode())
             models = [m.get("name", "") for m in body.get("models", [])]
             print("[DEBUG] Ollama models found:", models)
-            # Accept llama3.2:3b or llama3.1:8b — prefer 3b for this task
             for preferred in ["llama3.2", "llama3.1", "llama"]:
                 if any(preferred in m for m in models):
-                    # Update model to the best available
                     if any("llama3.2" in m for m in models):
                         self.OLLAMA_MODEL = "llama3.2:3b"
                     elif any("llama3.1" in m for m in models):
@@ -186,15 +181,10 @@ class RefinementEngine:
     # ── Preamble stripper ─────────────────────────────────────────────────────
 
     def _strip_preamble(self, text: str) -> str:
-        """
-        Remove anything the model outputs before the actual report text.
-        Models sometimes repeat 'REPORT TEXT:' or add 'Here is the section:' etc.
-        """
-        # Strip the literal trigger phrase if echoed back
+        """Remove any boilerplate the model outputs before the actual report text."""
         if "REPORT TEXT:" in text:
             text = text.split("REPORT TEXT:", 1)[-1]
 
-        # Strip common preamble phrases line by line
         bad_starts = (
             "here is", "here's", "below is", "the following",
             "this is a", "this data", "based on the",
@@ -232,9 +222,8 @@ class RefinementEngine:
             if not ts:
                 return "unknown"
             try:
-                iso = datetime.datetime.utcfromtimestamp(int(ts)).strftime(
+                return datetime.datetime.utcfromtimestamp(int(ts)).strftime(
                     "%Y-%m-%d %H:%M:%S UTC")
-                return f"{iso}"  # Just ISO — no epoch, simpler for model
             except Exception:
                 return str(ts)
 
@@ -250,17 +239,13 @@ class RefinementEngine:
             except Exception:
                 return str(sz)
 
-        # ── Convert findings to plain English sentences ───────────────────────
-        # Instead of sending raw dicts, pre-convert to readable strings
-        # so the model gets sentences, not JSON to describe.
-
         def finding_to_sentence(f):
-            ftype = f.get("type", "unknown")
-            path  = f.get("path", "unknown path")
-            ts    = fmt_ts(f.get("timestamp"))
-            sz    = fmt_sz(f.get("size"))
+            ftype  = f.get("type", "unknown")
+            path   = f.get("path", "unknown path")
+            ts     = fmt_ts(f.get("timestamp"))
+            sz     = fmt_sz(f.get("size"))
             reason = f.get("reason", "")
-            sev   = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}.get(
+            sev    = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}.get(
                 f.get("severity", 1), "LOW")
 
             parts = [f"[{sev}] {ftype}: {reason}"]
@@ -273,7 +258,7 @@ class RefinementEngine:
             return " | ".join(parts)
 
         def anomaly_to_sentence(a):
-            atype = a.get("type", "unknown")
+            atype  = a.get("type", "unknown")
             reason = a.get("reason", "")
             count  = a.get("event_count")
             start  = fmt_ts(a.get("start"))
@@ -298,12 +283,10 @@ class RefinementEngine:
         rare_exts   = [a for a in anomalies if a.get("type") == "rare_extension"]
         other_a     = [a for a in anomalies if a.get("type") != "rare_extension"]
 
-        # Pre-convert everything to readable strings
         critical_sentences   = [finding_to_sentence(f) for f in critical]
         supporting_sentences = [finding_to_sentence(f) for f in supporting[:20]]
         anomaly_sentences    = [anomaly_to_sentence(a) for a in other_a[:15]]
 
-        # Build timeline as readable lines
         timeline_lines = []
         for e in user_events:
             ts   = fmt_ts(e.get("timestamp"))
@@ -317,20 +300,20 @@ class RefinementEngine:
 
         return {
             "summary": {
-                "total_findings":    len(findings),
-                "critical_count":    len(critical),
-                "supporting_count":  len(supporting),
-                "anomaly_count":     len(anomalies),
-                "wiped_records":     wiped_count,
-                "total_events":      len(timeline_events),
-                "user_events":       len(user_events),
+                "total_findings":   len(findings),
+                "critical_count":   len(critical),
+                "supporting_count": len(supporting),
+                "anomaly_count":    len(anomalies),
+                "wiped_records":    wiped_count,
+                "total_events":     len(timeline_events),
+                "user_events":      len(user_events),
             },
-            "critical_findings":    critical_sentences,
-            "supporting_findings":  supporting_sentences,
-            "anomalies":            anomaly_sentences,
-            "rare_ext_count":       len(rare_exts),
-            "rare_ext_examples":    list({a.get("extension") for a in rare_exts if a.get("extension")})[:8],
-            "timeline_lines":       timeline_lines,
+            "critical_findings":   critical_sentences,
+            "supporting_findings": supporting_sentences,
+            "anomalies":           anomaly_sentences,
+            "rare_ext_count":      len(rare_exts),
+            "rare_ext_examples":   list({a.get("extension") for a in rare_exts if a.get("extension")})[:8],
+            "timeline_lines":      timeline_lines,
             "browser": {
                 "visit_count":    len(browser.get("visits", [])),
                 "download_count": len(browser.get("downloads", [])),
@@ -339,10 +322,6 @@ class RefinementEngine:
         }
 
     # ── Section prompts ───────────────────────────────────────────────────────
-    # Every prompt:
-    #   1. States EXACTLY what to write (length, format)
-    #   2. Provides data as plain readable lines, NOT raw JSON
-    #   3. Ends without "REPORT TEXT:" — that is appended by the caller
 
     def _prompt_executive_summary(self, ctx: dict) -> str:
         s = ctx["summary"]

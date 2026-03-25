@@ -1,11 +1,3 @@
-"""
-core/tool_runner.py
-
-Runs SleuthKit tools from bin/sleuthkit/.
-Auto-injects -i ewf for E01 files and normalises paths to OS-native
-separators so libewf's internal glob doesn't choke on forward slashes.
-"""
-
 import os
 import subprocess
 import shutil

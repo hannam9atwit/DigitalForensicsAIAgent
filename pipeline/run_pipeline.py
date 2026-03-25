@@ -12,8 +12,9 @@ from ai.report_generator import ReportGenerator
 
 def run_pipeline(path, log):
     """
-    Runs the full forensic pipeline.
-    'log' is a callback function that receives log messages.
+    Runs the full forensic pipeline on a given artifact path.
+    'log' is a callback that receives status messages (e.g. GUI log panel).
+    Returns (analysis_dict, report_path).
     """
 
     log("[*] Routing artifact...")
@@ -23,87 +24,53 @@ def run_pipeline(path, log):
 
     artifact_type = route["artifact_type"]
 
-    # ---------------------------------------------------------
     # Disk Forensics
-    # ---------------------------------------------------------
     disk_data = {"events": []}
 
     if artifact_type == "disk_image":
         log("[*] Running Disk Forensics...")
-
-        mft = MFTParser().parse(path)
+        MFTParser().parse(path)
         log("[+] MFT parsed")
 
-        deleted = DeletedRecovery().recover(path)
+        DeletedRecovery().recover(path)
         log("[+] Deleted files processed")
 
-        timeline = DiskTimelineBuilder().build_timeline(path)
+        disk_data = DiskTimelineBuilder().build_timeline(path)
         log("[+] Disk timeline built")
 
-        disk_data = timeline
-
-    # ---------------------------------------------------------
     # Browser Forensics
-    # ---------------------------------------------------------
-    browser_data = {
-        "visits": [],
-        "downloads": [],
-        "cookies": []
-    }
+    browser_data = {"visits": [], "downloads": [], "cookies": []}
 
     if artifact_type.startswith("browser"):
         log("[*] Running Browser Forensics...")
-
         hp = HistoryParser().parse(path)
         dp = DownloadsParser().parse(path)
         cp = CookiesParser().parse(path)
-
         browser_data = {
-            "visits": hp.get("visits", []),
+            "visits":    hp.get("visits", []),
             "downloads": dp.get("downloads", []),
-            "cookies": cp.get("cookies", [])
+            "cookies":   cp.get("cookies", []),
         }
-
         log("[+] Browser artifacts parsed")
-    # # ---------------------------------------------------------
-    # # Unified Timeline
-    # # ---------------------------------------------------------
-    # log(f"[DEBUG] disk_data type: {type(disk_data)} value: {disk_data}")
-    # log(f"[DEBUG] browser_data type: {type(browser_data)} value: {browser_data}")
-    #
-    # log("[*] Building Unified Timeline...")
-    # tce = TimelineCorrelationEngine()
-    # unified_timeline = tce.correlate(
-    #     disk_data.get("events", []),
-    #     browser_data.get("visits", []),
-    #     browser_data.get("downloads", []),
-    #     browser_data.get("cookies", [])
-    # )
 
-    # ---------------------------------------------------------
     # Unified Timeline
-    # ---------------------------------------------------------
     log("[*] Building Unified Timeline...")
     tce = TimelineCorrelationEngine()
     unified_timeline = tce.correlate(
         disk_data.get("events", []),
         browser_data.get("visits", []),
         browser_data.get("downloads", []),
-        browser_data.get("cookies", [])
+        browser_data.get("cookies", []),
     )
     log("[+] Timeline built")
 
-    # ---------------------------------------------------------
     # Reasoning Engine
-    # ---------------------------------------------------------
     log("[*] Running Reasoning Engine...")
-    re = ReasoningEngine()
-    analysis = re.analyze(disk_data, browser_data, unified_timeline)
+    reasoning = ReasoningEngine()
+    analysis = reasoning.analyze(disk_data, browser_data, unified_timeline)
     log("[+] Reasoning complete")
 
-    # ---------------------------------------------------------
     # Report Generation
-    # ---------------------------------------------------------
     log("[*] Generating Report...")
     rg = ReportGenerator()
     report_path = rg.generate(analysis)

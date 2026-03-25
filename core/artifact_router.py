@@ -1,6 +1,3 @@
-"""
-core/artifact_router.py
-"""
 import os
 from typing import Dict
 

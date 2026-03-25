@@ -1,0 +1,42 @@
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Generated reports (user output, not source)
+forensic_report.md
+forensic_report.pdf
+
+# SleuthKit binaries (too large / platform-specific, not in repo)
+bin/sleuthkit/
+
+# Disk images and forensic artifacts (sensitive / large)
+*.img
+*.dd
+*.raw
+*.e01
+*.ex01
+*.s01
+data/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

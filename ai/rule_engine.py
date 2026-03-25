@@ -1,11 +1,12 @@
 """
 ai/rule_engine.py
 
-Deterministic DFIR rule engine.
+Deterministic DFIR rule engine. Evaluates disk and browser artifacts against
+a fixed set of forensic rules and returns a list of severity-tagged findings.
 
-Key change: records with metadata_wiped=True (all timestamps and size = 0)
-are treated as a distinct HIGH-severity finding — wiped MFT metadata is
-itself a strong anti-forensic indicator, not just missing data.
+Records with metadata_wiped=True (all timestamps and size zeroed) are treated
+as a distinct HIGH-severity finding, since wiped MFT metadata is a strong
+anti-forensic indicator in its own right.
 """
 
 
@@ -15,10 +16,10 @@ class RuleEngine:
         print("[DEBUG] RuleEngine disk_data type:", type(disk_data))
         print("[DEBUG] RuleEngine disk events sample:", disk_data.get("events", [])[:3])
 
-        findings = []
+        findings    = []
         disk_events = disk_data.get("events", [])
 
-        # ── RULE 1 — Deleted user files ───────────────────────────────────────
+        # RULE 1 — Deleted user files
         for e in disk_events:
             path = e.get("path", "")
             if "(deleted)" in path and not path.startswith("/$"):
@@ -31,16 +32,15 @@ class RuleEngine:
                     "details":   e,
                 })
 
-        # ── RULE 2 — Wiped MFT metadata ──────────────────────────────────────
-        # Zero timestamps + zero size on a deleted file = metadata was wiped,
-        # not just that the file was deleted normally.
+        # RULE 2 — Wiped MFT metadata
+        # Zero timestamps + zero size on a deleted file means the metadata was
+        # actively wiped, not just that the file was normally deleted.
         wiped = [
             e for e in disk_events
             if e.get("metadata_wiped")
             and not e.get("path", "").startswith("/$")
         ]
         if wiped:
-            # Report as a single grouped finding to avoid flooding
             self._safe_append(findings, {
                 "type":      "wiped_mft_metadata",
                 "severity":  3,
@@ -55,7 +55,7 @@ class RuleEngine:
                 "details": {"wiped_files": [e.get("path") for e in wiped[:20]]},
             })
 
-        # ── RULE 3 — Orphaned files ───────────────────────────────────────────
+        # RULE 3 — Orphaned files
         for e in disk_events:
             if "/$OrphanFiles" in e.get("path", ""):
                 self._safe_append(findings, {
@@ -67,7 +67,7 @@ class RuleEngine:
                     "details":   e,
                 })
 
-        # ── RULE 4 — Alternate data streams ──────────────────────────────────
+        # RULE 4 — Alternate data streams
         for e in disk_events:
             path = e.get("path", "")
             if ":" in path and not path.startswith("/$"):
@@ -80,25 +80,21 @@ class RuleEngine:
                     "details":   e,
                 })
 
-        # ── RULE 5 — Timestamp anomalies (mtime < crtime) ────────────────────
+        # RULE 5 — Timestamp anomalies (mtime earlier than crtime)
         for e in disk_events:
             m = e.get("mtime")
             c = e.get("crtime")
-            # Only flag if both are non-zero (zero = wiped, handled above)
             if isinstance(m, int) and isinstance(c, int) and m > 0 and c > 0 and m < c:
                 self._safe_append(findings, {
                     "type":      "timestamp_anomaly",
                     "severity":  2,
                     "path":      e.get("path"),
                     "timestamp": m,
-                    "reason": (
-                        f"mtime ({m}) is earlier than crtime ({c}) — "
-                        f"possible timestomping."
-                    ),
-                    "details": e,
+                    "reason":    f"mtime ({m}) is earlier than crtime ({c}) — possible timestomping.",
+                    "details":   e,
                 })
 
-        # ── RULE 6 — Large $BadClus:$Bad ─────────────────────────────────────
+        # RULE 6 — Abnormally large $BadClus:$Bad stream
         for e in disk_events:
             path = e.get("path", "")
             size = e.get("size", 0)
@@ -109,14 +105,11 @@ class RuleEngine:
                     "path":      path,
                     "size":      size,
                     "timestamp": e.get("timestamp"),
-                    "reason": (
-                        f"$BadClus:$Bad stream is {size:,} bytes — possible "
-                        f"anti-forensic bad cluster manipulation."
-                    ),
-                    "details": e,
+                    "reason":    f"$BadClus:$Bad stream is {size:,} bytes — possible anti-forensic bad cluster manipulation.",
+                    "details":   e,
                 })
 
-        # ── RULE 7 — Deleted directory with live children ─────────────────────
+        # RULE 7 — Deleted directory with live child entries
         deleted_dirs = [
             e for e in disk_events
             if "(deleted)" in e.get("path", "")
@@ -133,11 +126,8 @@ class RuleEngine:
                         "directory": d["path"],
                         "child":     child,
                         "timestamp": d.get("timestamp"),
-                        "reason": (
-                            "Deleted directory still has active child entries — "
-                            "possible incomplete deletion or anti-forensic activity."
-                        ),
-                        "details": {"directory": d, "child": e},
+                        "reason":    "Deleted directory still has active child entries — possible incomplete deletion or anti-forensic activity.",
+                        "details":   {"directory": d, "child": e},
                     })
 
         return findings

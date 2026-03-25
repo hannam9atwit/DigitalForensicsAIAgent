@@ -1,13 +1,11 @@
 from collections import Counter
 
+
 class AnomalyEngine:
     """
     Heuristic/statistical anomaly detection over disk and browser artifacts.
-    Produces 'anomalies' (weird, not necessarily malicious).
+    Produces anomalies (unusual patterns — not necessarily malicious).
     """
-
-    def __init__(self):
-        pass
 
     def run(self, disk_data, browser_data, unified_timeline):
         print("[DEBUG] AnomalyEngine disk_data type:", type(disk_data))
@@ -15,29 +13,24 @@ class AnomalyEngine:
 
         anomalies = []
 
-        disk_events = disk_data.get("events", [])
-        browser_visits = browser_data.get("visits", [])
+        disk_events       = disk_data.get("events", [])
         browser_downloads = browser_data.get("downloads", [])
 
-        # ---------------------------------------------------------
         # ANOMALY 1 — Very large files
-        # ---------------------------------------------------------
         for e in disk_events:
             size = e.get("size")
-            if isinstance(size, int) and size > 100_000_000:  # > ~100MB
+            if isinstance(size, int) and size > 100_000_000:
                 self._safe_append(anomalies, {
-                    "type": "large_file",
-                    "severity": 1,
-                    "path": e.get("path"),
-                    "size": size,
+                    "type":      "large_file",
+                    "severity":  1,
+                    "path":      e.get("path"),
+                    "size":      size,
                     "timestamp": e.get("timestamp"),
-                    "reason": "File size is unusually large compared to typical NTFS system files.",
-                    "details": e
+                    "reason":    "File size is unusually large compared to typical NTFS system files.",
+                    "details":   e,
                 })
 
-        # ---------------------------------------------------------
-        # ANOMALY 2 — Rare extensions
-        # ---------------------------------------------------------
+        # ANOMALY 2 — Rare extensions (appear only once in the dataset)
         ext_counter = Counter()
         for e in disk_events:
             path = e.get("path", "")
@@ -53,30 +46,24 @@ class AnomalyEngine:
                 ext = path.rsplit(".", 1)[-1].lower()
                 if ext in rare_exts:
                     self._safe_append(anomalies, {
-                        "type": "rare_extension",
-                        "severity": 1,
-                        "path": path,
+                        "type":      "rare_extension",
+                        "severity":  1,
+                        "path":      path,
                         "extension": ext,
                         "timestamp": e.get("timestamp"),
-                        "reason": "File extension appears only once in the dataset — unusual or uncommon file type.",
-                        "details": e
+                        "reason":    "File extension appears only once in the dataset — unusual or uncommon file type.",
+                        "details":   e,
                     })
 
-        # ---------------------------------------------------------
-        # ANOMALY 3 — Activity bursts (many events in short time)
-        #
-        # FIX: Previously i incremented by 1 every iteration, causing
-        # every single timestamp to be treated as a burst window start.
-        # This produced O(n²) duplicate anomalies on real disk images.
-        # Now we advance i to j after processing each window, so each
-        # burst cluster is only reported once.
-        # ---------------------------------------------------------
+        # ANOMALY 3 — Activity bursts (many events within a short window)
+        # Each burst cluster is reported once: after processing a window,
+        # i advances to j so overlapping windows are not double-counted.
         timestamps = sorted(
             [e.get("timestamp") for e in disk_events if isinstance(e.get("timestamp"), int)]
         )
 
-        window = 60     # seconds
-        threshold = 20  # events per window
+        window    = 60   # seconds
+        threshold = 20   # events per window
 
         i = 0
         n = len(timestamps)
@@ -88,27 +75,25 @@ class AnomalyEngine:
             count = j - i
             if count >= threshold:
                 self._safe_append(anomalies, {
-                    "type": "activity_burst",
-                    "severity": 2,
-                    "start": start,
-                    "end": start + window,
+                    "type":        "activity_burst",
+                    "severity":    2,
+                    "start":       start,
+                    "end":         start + window,
                     "event_count": count,
-                    "reason": f"{count} filesystem events occurred within {window} seconds — possible mass file creation or system initialization.",
-                    "details": {"timestamps": timestamps[i:j]}
+                    "reason":      f"{count} filesystem events occurred within {window} seconds — possible mass file creation or system initialization.",
+                    "details":     {"timestamps": timestamps[i:j]},
                 })
-                i = j  # skip past the entire burst window — don't re-evaluate from i+1
+                i = j
             else:
                 i += 1
 
-        # ---------------------------------------------------------
-        # ANOMALY 4 — Downloads with no obvious disk counterpart
-        # ---------------------------------------------------------
+        # ANOMALY 4 — Downloads with no corresponding disk activity
         if browser_downloads and not disk_events:
             self._safe_append(anomalies, {
-                "type": "downloads_without_disk_activity",
+                "type":     "downloads_without_disk_activity",
                 "severity": 1,
-                "reason": "Browser downloads detected but no corresponding disk activity — file may have been deleted or stored elsewhere.",
-                "details": {"downloads": browser_downloads}
+                "reason":   "Browser downloads detected but no corresponding disk activity — file may have been deleted or stored elsewhere.",
+                "details":  {"downloads": browser_downloads},
             })
 
         return anomalies

@@ -1,5 +1,5 @@
 """
-setup_wizard.py
+gui/setup_wizard.py
 
 First-run wizard shown when Ollama is not detected.
 Handles downloading and installing Ollama, then pulling the model.
@@ -10,13 +10,12 @@ import sys
 import os
 import platform
 import subprocess
-import threading
 import urllib.request
 import urllib.error
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QTextEdit, QDialogButtonBox, QSizePolicy
+    QProgressBar, QTextEdit, QDialogButtonBox, QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QFont
@@ -32,13 +31,9 @@ OLLAMA_WINDOWS_URL = (
 OLLAMA_LINUX_INSTALL_CMD = "curl -fsSL https://ollama.com/install.sh | sh"
 
 
-# ---------------------------------------------------------------------------
-# Worker — runs in a QThread so the UI stays responsive
-# ---------------------------------------------------------------------------
-
 class SetupWorker(QObject):
     progress = Signal(str)   # log message
-    done     = Signal(bool)  # success/failure
+    done     = Signal(bool)  # success / failure
 
     def run(self):
         try:
@@ -68,8 +63,6 @@ class SetupWorker(QObject):
             self.progress.emit(f"[!] Setup failed: {e}")
             self.done.emit(False)
 
-    # ── Install ──────────────────────────────────────────────────────────────
-
     def _ollama_installed(self) -> bool:
         import shutil
         if shutil.which("ollama"):
@@ -90,49 +83,38 @@ class SetupWorker(QObject):
 
         urllib.request.urlretrieve(OLLAMA_WINDOWS_URL, tmp, reporthook)
         self.progress.emit("[*] Running installer (follow any UAC prompts)...")
-        subprocess.run([tmp, "/S"], check=True)   # /S = silent install
+        subprocess.run([tmp, "/S"], check=True)
         self.progress.emit("[+] Ollama installed.")
 
     def _install_linux(self):
         self.progress.emit("[*] Running Ollama install script (requires sudo)...")
         result = subprocess.run(
             OLLAMA_LINUX_INSTALL_CMD,
-            shell=True,
-            capture_output=True,
-            text=True
+            shell=True, capture_output=True, text=True,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr or "Install script failed")
         self.progress.emit("[+] Ollama installed.")
 
-    # ── Model pull ───────────────────────────────────────────────────────────
-
     def _find_ollama(self) -> str:
-        """
-        Returns the full path to the ollama executable.
-        Checks PATH first, then the default Windows install location.
-        """
         import shutil
         path = shutil.which("ollama")
         if path:
             return path
-
-        # Default Ollama install location on Windows
         local_app_data = os.environ.get("LOCALAPPDATA", "")
         candidate = os.path.join(local_app_data, "Programs", "Ollama", "ollama.exe")
         if os.path.exists(candidate):
             return candidate
-
         raise RuntimeError(
             "ollama.exe not found. Please restart the app after installation, "
             "or install Ollama manually from https://ollama.com"
         )
 
     def _pull_model(self):
-        ollama_exe = self._find_ollama()
+        import re
+        ollama_exe  = self._find_ollama()
         self.progress.emit(f"[*] Found Ollama at: {ollama_exe}")
 
-        import re
         ansi_escape = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]|\x1B[^[\x1B]*|\[[?][0-9]*[lh]')
 
         proc = subprocess.Popen(
@@ -140,17 +122,15 @@ class SetupWorker(QObject):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             encoding="utf-8",
-            errors="replace",  # never crash on weird characters
-            env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"}  # tell Ollama to skip fancy output
+            errors="replace",
+            env={**os.environ, "NO_COLOR": "1", "TERM": "dumb"},
         )
 
         last_line = ""
         for line in proc.stdout:
-            # Strip ANSI escape sequences
             clean = ansi_escape.sub("", line).strip()
             if not clean:
                 continue
-            # Ollama repeats the same status line many times — only emit when it changes
             if clean != last_line:
                 self.progress.emit(f"    {clean}")
                 last_line = clean
@@ -160,17 +140,13 @@ class SetupWorker(QObject):
             raise RuntimeError(f"ollama pull exited with code {proc.returncode}")
 
 
-# ---------------------------------------------------------------------------
-# Dialog
-# ---------------------------------------------------------------------------
-
 class SetupWizard(QDialog):
     """
     Modal dialog shown on first run when Ollama is not available.
-    The user can trigger setup or skip (app falls back to deterministic output).
+    The user can run the setup or skip (app falls back to deterministic output).
     """
 
-    setup_complete = Signal()   # emitted when Ollama + model are ready
+    setup_complete = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -181,7 +157,6 @@ class SetupWizard(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        # Header
         header = QLabel("Local AI Setup")
         font = QFont()
         font.setPointSize(16)
@@ -189,7 +164,6 @@ class SetupWizard(QDialog):
         header.setFont(font)
         layout.addWidget(header)
 
-        # Description
         desc = QLabel(
             "Forensic AI Agent uses a local language model (Llama 3.2 3B via Ollama) "
             "to generate investigative narratives — no internet connection or API key required "
@@ -202,20 +176,17 @@ class SetupWizard(QDialog):
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
-        # Log output
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setFixedHeight(160)
         self.log.setStyleSheet("font-family: monospace; font-size: 12px;")
         layout.addWidget(self.log)
 
-        # Progress bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)   # indeterminate
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
-        # Buttons
         btn_row = QHBoxLayout()
         self.install_btn = QPushButton("Install Ollama + Download Model")
         self.install_btn.setStyleSheet("padding: 8px; font-weight: bold;")
@@ -242,7 +213,6 @@ class SetupWizard(QDialog):
         self.thread = QThread()
         self.worker = SetupWorker()
         self.worker.moveToThread(self.thread)
-
         self.worker.progress.connect(self._append_log)
         self.worker.done.connect(self._setup_done)
         self.thread.started.connect(self.worker.run)

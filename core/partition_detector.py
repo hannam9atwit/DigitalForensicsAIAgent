@@ -1,11 +1,3 @@
-"""
-core/partition_detector.py
-
-Detects NTFS partition offset for raw images and E01/EWF files.
-Normalises paths to Windows-native backslashes before calling SleuthKit —
-mixed forward/back slashes cause the libewf glob to fail on Windows.
-"""
-
 import os
 import subprocess
 import shutil
