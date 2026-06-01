@@ -21,7 +21,7 @@ from PySide6.QtCore import Qt, Signal, QObject, QThread
 from PySide6.QtGui import QFont
 
 
-OLLAMA_MODEL   = "llama3.1:8b"
+OLLAMA_MODEL   = "llama3.2:3b"
 OLLAMA_VERSION = "0.3.14"
 
 OLLAMA_WINDOWS_URL = (
@@ -164,14 +164,21 @@ class SetupWizard(QDialog):
         header.setFont(font)
         layout.addWidget(header)
 
+        subtitle = QLabel("One-time setup to install Ollama and download the local model for offline AI.")
+        subtitle_font = QFont()
+        subtitle_font.setPointSize(10)
+        subtitle.setFont(subtitle_font)
+        subtitle.setStyleSheet("color: gray;")
+        layout.addWidget(subtitle)
+
         desc = QLabel(
-            "Forensic AI Agent uses a local language model (Llama 3.2 3B via Ollama) "
-            "to generate investigative narratives — no internet connection or API key required "
-            "after setup.\n\n"
+            "Forensic AI Agent uses a local language model (Llama 3.2:3b via Ollama) "
+            "to generate investigative narratives. This setup installs Ollama and downloads "
+            "the local model (~2 GB) one time, so the app runs offline after setup.\n\n"
             f"Setup will:\n"
-            f"  1. Install Ollama (if not already installed)\n"
-            f"  2. Download the {OLLAMA_MODEL} model (~2 GB)\n\n"
-            "This only runs once. You can skip and use the built-in rule-based narrative instead."
+            f"  • Install Ollama (if not already installed)\n"
+            f"  • Download the {OLLAMA_MODEL} model (~2 GB)\n\n"
+            "If you prefer, you can skip setup and use the built-in rule-based narrative instead."
         )
         desc.setWordWrap(True)
         layout.addWidget(desc)
@@ -188,12 +195,12 @@ class SetupWizard(QDialog):
         layout.addWidget(self.progress_bar)
 
         btn_row = QHBoxLayout()
-        self.install_btn = QPushButton("Install Ollama + Download Model")
+        self.install_btn = QPushButton("Install local AI (Ollama + model)")
         self.install_btn.setStyleSheet("padding: 8px; font-weight: bold;")
         self.install_btn.clicked.connect(self.start_setup)
         btn_row.addWidget(self.install_btn)
 
-        self.skip_btn = QPushButton("Skip (use rule-based narrative)")
+        self.skip_btn = QPushButton("Skip setup and use rule-based mode")
         self.skip_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.skip_btn)
 
@@ -230,6 +237,8 @@ class SetupWizard(QDialog):
         self.progress_bar.setVisible(False)
 
         if success:
+            self._append_log("[✓] Setup is complete. Close this window to continue.")
+            self.close_btn.setText("Done")
             self.close_btn.setVisible(True)
             self.setup_complete.emit()
         else:

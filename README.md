@@ -1,6 +1,20 @@
 # Forensic AI Agent
 
+[![Download Release](https://img.shields.io/badge/Download-Release-blue?logo=github)](https://github.com/hannam9atwit/DigitalForensicsAIAgent/releases/latest)
+
 A cross-platform digital forensics investigation tool powered by a local LLM (Llama 3.2 via Ollama), with optional Anthropic Claude API support.
+
+---
+
+## Quick Download & Setup
+
+1. Click the blue **Download Release** button above.
+2. Download the latest Windows package from GitHub Releases.
+3. Extract the ZIP file and open `ForensicAIAgent.exe`.
+4. On first launch, follow the setup wizard to install Ollama and download the local model (~2 GB).
+5. After setup completes, the app runs fully offline and is ready for investigations.
+
+> The setup wizard only requires internet for the first install and model download. After that, the app works locally.
 
 ---
 
@@ -34,8 +48,8 @@ A cross-platform digital forensics investigation tool powered by a local LLM (Ll
 - The SleuthKit Windows binaries in `bin/sleuthkit/` (not included in repo — see below)
 
 ```bash
-git clone https://github.com/yourorg/forensic-ai-agent.git
-cd forensic-ai-agent
+git clone https://github.com/hannam9atwit/DigitalForensicsAIAgent.git
+cd DigitalForensicsAIAgent
 pip install -r requirements.txt
 python gui_main.py
 ```
@@ -85,6 +99,26 @@ chmod +x build_linux.sh
 Output:
 - `dist/ForensicAIAgent/` — portable folder
 - `dist/ForensicAIAgent.AppImage` — single-file distributable
+
+---
+
+## Reset / Uninstall for Testing
+
+If you already installed the app and want to remove it before testing again:
+
+- Delete the extracted application folder.
+- If you installed Ollama, uninstall it from **Windows Settings → Apps**.
+- Remove the downloaded model with:
+
+```powershell
+ollama rm llama3.2:3b
+```
+
+Or run the included helper script from PowerShell:
+
+```powershell
+.\cleanup_test_installation.ps1
+```
 
 ---
 
