@@ -1,29 +1,32 @@
 """
 gui_v2/data_adapter.py
 
-Bridges the existing forensic pipeline to the GUI's case-dict shape.
+Bridges the forensic pipeline to the shape the screens render.
 
-build_case_from_analysis() takes the dict returned by
-ai.reasoning_engine.ReasoningEngine.analyze() (the same object the old
-pipeline produced) plus some intake metadata, and reshapes it into exactly
-what screens.py expects — so the native screens render real results with no
-code changes.
+The screens never branch on "demo vs real": content.demo_case() and this module
+produce the same keys, so anything that works against the fixture works against
+a live analysis. That contract is the whole point of this file — see
+gui_v2/content.py for the reference shape.
 
-It also folds in MITRE + confidence via ai.ioc_matcher if that module is
-present (added in the integration step); if not, it degrades gracefully.
+The pipeline emits machine facts (a type, a severity number, a rule id). The UI
+needs to answer three questions for every finding — what is this, why am I
+seeing it, what should I do — so this module is where that translation happens:
+severity numbers become words, ATT&CK codes get their plain-English name, and
+each finding type carries the follow-up actions an examiner would actually take.
+Where the pipeline genuinely cannot know something (the narrative "phase" of an
+incident), the key is omitted rather than guessed, and the UI degrades to a flat
+list instead of inventing structure.
 """
 
 import datetime
-import hashlib
-import os
 
-try:
-    from ai import ioc_matcher
-except Exception:                      # ioc_matcher optional
-    ioc_matcher = None
+from .content import REPORT_TITLE
 
-SEV_LABEL = {4: "Critical", 3: "High", 2: "Medium", 1: "Low"}
+# ── severity ──────────────────────────────────────────────────────────────────
 
+SEV_TEXT = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}
+
+# Screen-facing titles for the pipeline's finding types.
 TITLES = {
     "deleted_user_file": "Deleted user file recovered",
     "wiped_mft_metadata": "MFT metadata deliberately wiped",
@@ -35,11 +38,94 @@ TITLES = {
     "activity_burst": "Filesystem activity burst",
     "rare_extension": "Rare file extension observed",
     "large_file": "Unusually large file",
+    "service_installed": "Service installed",
+    "history_gap": "Log or history gap",
+    "exfiltration_removable_media": "Data written to removable media",
 }
 
-SRC_MAP = {"disk": "Disk", "browser_visit": "Browser", "browser_download": "Downloads",
-           "cookie": "Browser", "EventLog": "EventLog", "Registry": "Registry",
-           "Network": "Network", "Email": "Email", "USB": "USB"}
+# What an examiner should do next, per finding type. Without these the rail's
+# "WHAT SHOULD I DO?" block would be empty on every real case — which is the
+# exact failure the redesign exists to fix.
+NEXT_STEPS = {
+    "deleted_user_file": [
+        "Recover the file from unallocated space and hash it",
+        "Establish whether the deletion was routine for this user",
+    ],
+    "wiped_mft_metadata": [
+        "Compare against the $MFTMirr backup for surviving records",
+        "Check for wiping tools in installed programs and prefetch",
+    ],
+    "timestamp_anomaly": [
+        "Treat the affected timestamps as untrusted in the timeline",
+        "Corroborate the sequence against a second source (registry, event log)",
+    ],
+    "activity_burst": [
+        "Check what the burst touched — user data or system files",
+        "Compare the rate against this user's normal baseline",
+    ],
+    "exfiltration_removable_media": [
+        "Identify the device from the registry (USBSTOR serial)",
+        "Acquire the physical device if it can be located",
+    ],
+    "history_gap": [
+        "Recover surviving records from backups or unallocated space",
+        "Check whether the gap aligns with other activity",
+    ],
+    "service_installed": [
+        "Establish whether the service was sanctioned",
+        "Check the binary's path and signature",
+    ],
+    "alternate_data_stream": [
+        "Read the stream's contents in the raw viewer",
+        "Check whether the stream hides an executable",
+    ],
+}
+
+GENERIC_NEXT = ["Open the supporting evidence and confirm the underlying records",
+                "Corroborate against a second source before relying on this"]
+
+# ── evidence ──────────────────────────────────────────────────────────────────
+
+# Plain-English descriptions per artifact kind, so the rail can say what an
+# artifact *is* rather than repeating its filename.
+KIND_PLAIN = {
+    "disk": ("A bit-for-bit copy of a drive — the record of what happened on it.",
+             "It anchors filesystem findings: what was created, copied and deleted."),
+    "browser": ("What the user searched for and visited, with timestamps.",
+                "It shows intent and activity around the incident."),
+    "registry": ("Windows settings — records devices, recent files and program use.",
+                 "It identifies attached devices and when they were connected."),
+    "eventlog": ("Windows' own record of sign-ins, services and system events.",
+                 "It establishes who was signed in and when."),
+    "prefetch": ("Windows' record of which programs ran, and when.",
+                 "It shows what was executed on the machine."),
+    "network": ("Captured network traffic.",
+                "It shows what left or entered the machine over the network."),
+    "email": ("Stored mail messages and attachments.",
+              "It shows what was communicated and what was attached."),
+    "unknown": ("An artifact of an unrecognised type, read as raw bytes.",
+                "Its role in the case has not been established."),
+}
+
+REL_MAP = {"significant": "sig", "notable": "not", "context": "ctx", "noise": "noise"}
+
+# The parsers are inconsistent about source casing ("disk" vs "Disk"), and the
+# timeline's filter pills and source colours both key off the exact string — an
+# unnormalised "disk" silently matches no filter and renders in the default
+# grey. Canonicalise here, once, rather than making every screen defensive.
+SRC_CANON = {
+    "disk": "Disk", "browser": "Browser", "browser_visit": "Browser",
+    "downloads": "Downloads", "browser_download": "Downloads",
+    "cookie": "Browser", "registry": "Registry", "eventlog": "EventLog",
+    "event_log": "EventLog", "usb": "USB", "network": "Network",
+    "email": "Email", "prefetch": "Disk",
+}
+
+
+def _src(raw):
+    if not raw:
+        return "Disk"
+    return SRC_CANON.get(str(raw).strip().lower(), str(raw).strip().capitalize())
 
 
 def _fmt(ts):
@@ -57,209 +143,170 @@ def _risk(findings):
     return score, label
 
 
-def build_case_from_analysis(analysis: dict, *, artifact_path: str,
-                             examiner="Examiner", examiner_id="EX-00",
-                             case_id=None, agency="") -> dict:
-    raw_findings = analysis.get("findings", [])
-    raw_events = analysis.get("timeline", {}).get("events", [])
-
-    # findings: assign F-IDs (critical-first), MITRE, confidence
-    sorted_f = sorted(raw_findings, key=lambda f: -f.get("severity", 1))
-    findings = []
-    fid_by_type = {}
-    for i, f in enumerate(sorted_f):
-        ftype = f.get("type", "finding")
-        fid = f"F-{i+1:02d}"
-        mitre, mname = (ioc_matcher.match(ftype) if ioc_matcher else (None, None))
-        conf = (ioc_matcher.confidence(f) if ioc_matcher else "Medium")
-        findings.append({
-            "id": fid, "sev": f.get("severity", 1), "conf": conf,
-            "mitre": mitre, "mitreName": mname,
-            "title": TITLES.get(ftype, ftype.replace("_", " ").capitalize()),
-            "ts": _fmt(f.get("timestamp")),
-            "evidence": ["EV-01"],
-            "reason": f.get("reason", ""),
-            "rule": f.get("rule", "rule engine / anomaly engine"),
-        })
-        fid_by_type.setdefault(ftype, fid)
-
-    # events: (ts, src, label, path, sev, fid)
-    events = []
-    for e in raw_events:
-        src_raw = e.get("source", "disk")
-        src = SRC_MAP.get(src_raw, src_raw.capitalize() if isinstance(src_raw, str) else "Disk")
-        label = e.get("label") or ("Filesystem — " + (e.get("path") or "")[-70:])
-        events.append((_fmt(e.get("timestamp")), src, label[:120],
-                       (e.get("path") or "")[:160], e.get("sev", 1),
-                       fid_by_type.get(e.get("type"))))
-
-    # evidence (single artifact intake; real CoC lives in server.case_manager
-    # if you adopt it, but the native app can hash here directly)
-    digest = ""
-    size_s = "—"
-    try:
-        h = hashlib.sha256()
-        with open(artifact_path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                h.update(chunk)
-        digest = h.hexdigest()
-        n = os.path.getsize(artifact_path)
-        size_s = (f"{n/1_073_741_824:.1f} GB" if n >= 1_073_741_824
-                  else f"{n/1_048_576:.1f} MB" if n >= 1_048_576 else f"{n/1024:.1f} KB")
-    except Exception:
-        pass
-
-    score, risk_label = _risk(raw_findings)
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    evidence = [{
-        "id": "EV-01", "name": os.path.basename(artifact_path),
-        "type": "Evidence artifact", "kind": "disk", "size": size_s,
-        "added": now, "sha256": digest, "verified": bool(digest),
-        "lastVerified": now if digest else None,
-        "detail": f"{len(raw_events)} events parsed",
-        "parser": "pipeline", "events": len(raw_events),
-    }]
-
-    # narrative sections from the markdown
-    sections = []
-    md = analysis.get("narrative", "")
-    cur_h, cur_b = None, []
-    for line in md.split("\n"):
-        s = line.strip()
-        if s.startswith("## "):
-            if cur_h:
-                sections.append((cur_h, "Medium", " ".join(cur_b).strip()))
-            cur_h, cur_b = s.lstrip("# ").strip(), []
-        elif s and s != "---":
-            cur_b.append(s)
-    if cur_h:
-        sections.append((cur_h, "Medium", " ".join(cur_b).strip()))
-
-    audit = [
-        (now, examiner, "CASE_CREATED", f"Case registered for {os.path.basename(artifact_path)}"),
-        (now, examiner, "EVIDENCE_ADDED",
-         f"{os.path.basename(artifact_path)} · SHA-256 {digest[:8]}…{digest[-6:]} (read-only)" if digest else "artifact added"),
-        (now, "system", "ANALYSIS_COMPLETE", f"{len(raw_events)} events · {len(findings)} findings"),
-    ]
-
-    return {
-        "caseMeta": {
-            "id": case_id or f"FA-{datetime.date.today().year}-{abs(hash(artifact_path)) % 10000:04d}",
-            "title": "Investigation: " + os.path.basename(artifact_path),
-            "examiner": examiner, "examinerId": examiner_id, "agency": agency,
-            "opened": now, "custodian": examiner,
-            "riskScore": score, "riskLabel": risk_label,
-            "aiEngine": {"provider": "OpenClaw → Ollama (local)", "model": "llama3.2:3b",
-                         "status": "online", "fallback": "Claude API → Rule-based"},
-            "pipeline": {"lastRun": now, "duration": "—",
-                         "eventsParsed": len(raw_events), "status": "complete"},
-        },
-        "evidence": evidence,
-        "events": events,
-        "findings": findings,
-        "narrative": {"generated": now, "engine": "OpenClaw → Ollama · llama3.2:3b (local)",
-                      "sections": sections or [("Summary", "Medium", md[:800] or "No narrative generated.")]},
-        "audit": audit,
-    }
+def _first_sentence(text, limit=110):
+    """A one-line summary for the finding card, from the rule's reasoning."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    for stop in (". ", "; "):
+        if stop in t[:limit + 40]:
+            return t.split(stop)[0].strip() + "."
+    return (t[:limit].rstrip() + "…") if len(t) > limit else t
 
 
-# ── multi-evidence reshape (used by case_model.CaseBuilder) ───────────────────
+def _why(f):
+    """Assemble "why am I seeing this" from confidence, ATT&CK and the rule.
+
+    The design forbids showing a bare technique code, so the technique is only
+    mentioned when its human-readable name is available to go with it.
+    """
+    parts = []
+    conf = f.get("conf") or "Medium"
+    parts.append(f"Confidence is {str(conf).lower()} — this was raised by "
+                 f"{f.get('rule') or 'the rule and anomaly engines'}.")
+    mitre, mname = f.get("mitre"), f.get("mitreName")
+    if mitre and mname:
+        parts.append(f"Technique {mitre} (“{mname}”): the behaviour this finding "
+                     f"matches in the ATT&CK catalogue.")
+    return " ".join(parts)
+
 
 def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
-    """
-    Build the screen-facing case dict from a CaseBuilder's state.
-    Works with any number of evidence items and any mix of artifact kinds.
-    `analysis` may be None (case created but not yet analyzed).
+    """Build the screen-facing case dict from a CaseBuilder's state.
+
+    Works with any number of evidence items and any mix of kinds. `analysis` may
+    be None (case created, not yet analyzed).
     """
     analysis = analysis or {}
     raw_findings = analysis.get("findings", [])
     raw_events = analysis.get("events", [])
+    ev_ids = [e["id"] for e in evidence]
 
-    # findings → F-IDs (critical first) with MITRE + confidence already attached
+    # ── findings ──────────────────────────────────────────────────────────────
     sorted_f = sorted(raw_findings, key=lambda f: -f.get("severity", 1))
     findings, fid_by_type = [], {}
     for i, f in enumerate(sorted_f):
         ftype = f.get("type", "finding")
         fid = f"F-{i+1:02d}"
+        sev = f.get("severity", 1)
+
         art = None
         if isinstance(f.get("details"), dict):
             art = f["details"].get("artifact")
+        refs = [art] if art in ev_ids else (ev_ids[:1] if ev_ids else [])
+
+        reason = f.get("reason", "")
         findings.append({
-            "id": fid, "sev": f.get("severity", 1),
+            "id": fid,
+            "sev": SEV_TEXT.get(sev, "LOW"),
             "conf": f.get("conf", "Medium"),
-            "mitre": f.get("mitre"), "mitreName": f.get("mitreName"),
             "title": TITLES.get(ftype, ftype.replace("_", " ").capitalize()),
+            "short": _first_sentence(reason) or "No further detail was recorded.",
+            "what": reason or "The engine flagged this without a written reason.",
+            "why": _why(f),
+            "next": list(NEXT_STEPS.get(ftype, GENERIC_NEXT)),
+            "mitre": f.get("mitre") or "—",
+            "mitreName": f.get("mitreName"),
+            "ev": refs,
             "ts": _fmt(f.get("timestamp")),
-            "evidence": [art] if art else [e["id"] for e in evidence[:1]],
-            "reason": f.get("reason", ""),
-            "rule": f.get("rule", "rule engine / anomaly engine"),
+            "rule": f.get("rule", ""),
+            # No "phase": the pipeline has no notion of an incident narrative,
+            # and a guessed phase would be a claim the evidence does not make.
+            # Findings without one render as a flat list.
         })
         fid_by_type.setdefault(ftype, fid)
 
-    # events → dicts carrying interpretation (description, relevance, note)
+    # ── events ────────────────────────────────────────────────────────────────
     events = []
     for e in raw_events:
+        meaning = (e.get("meaning") or e.get("description") or e.get("note") or "")
         events.append({
             "ts": _fmt(e.get("timestamp")),
-            "src": e.get("source", "Disk"),
-            "label": (e.get("label") or "")[:120],
+            "src": _src(e.get("source")),
+            "label": (e.get("label") or "")[:160],
+            "mean": meaning or "No interpretation was recorded for this record.",
+            "rel": REL_MAP.get(e.get("relevance", "context"), "ctx"),
+            "fid": fid_by_type.get(e.get("type")),
             "path": (e.get("path") or "")[:160],
             "sev": e.get("sev", 1),
-            "fid": fid_by_type.get(e.get("type")),
-            "description": e.get("description", ""),
-            "relevance": e.get("relevance", "context"),
-            "note": e.get("note", ""),
-            "meaning": e.get("meaning", ""),
         })
 
-    # evidence → strip private _path into a UI-safe copy (keep _path for re-verify)
+    # ── evidence ──────────────────────────────────────────────────────────────
     ev_ui = []
     for e in evidence:
-        d = dict(e)
-        ev_ui.append(d)  # keep _path; screens ignore unknown keys, main_window uses it
+        d = dict(e)                      # keep _path; main_window re-verifies with it
+        kind = e.get("kind", "unknown")
+        plain, role = KIND_PLAIN.get(kind, KIND_PLAIN["unknown"])
+        d["kindLabel"] = e.get("type", "Artifact")
+        d["sha"] = e.get("sha256", "")
+        d["intake"] = e.get("added", "—")
+        d["plain"] = plain
+        d["role"] = (f"{role} It contributed {e.get('events', 0):,} events to the "
+                     f"timeline." if e.get("events") else role)
+        ev_ui.append(d)
 
     score, risk_label = _risk(raw_findings)
     pipeline = analysis.get("pipeline", {
         "lastRun": "—", "duration": "—", "eventsParsed": 0, "status": "idle"})
 
-    # narrative markdown → sections
-    sections = []
-    cur_h, cur_b = None, []
-    for line in analysis.get("narrative", "").split("\n"):
-        s = line.strip()
-        if s.startswith("## "):
-            if cur_h:
-                sections.append((cur_h, "Medium", " ".join(cur_b).strip()))
-            cur_h, cur_b = s.lstrip("# ").strip(), []
-        elif s and s != "---":
-            cur_b.append(s)
-    if cur_h:
-        sections.append((cur_h, "Medium", " ".join(cur_b).strip()))
-    for sec in sections[:2]:
-        if sec[1] == "Medium":
-            sections[sections.index(sec)] = (sec[0], "High", sec[2])
+    crit = sum(1 for f in findings if f["sev"] == "CRITICAL")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     return {
         "loaded": True,
+        "demo": False,
         "caseMeta": {
             "id": meta["id"], "title": meta["title"],
             "examiner": meta["examiner"], "examinerId": meta["examinerId"],
             "agency": meta.get("agency", ""), "opened": meta["opened"],
             "custodian": meta.get("custodian", meta["examiner"]),
             "riskScore": score, "riskLabel": risk_label,
-            "aiEngine": {"provider": "OpenClaw → Ollama (local)", "model": "llama3.2:3b",
+            "riskCaption": (f"Driven by {crit} critical finding"
+                            f"{'s' if crit != 1 else ''}." if crit else
+                            f"Based on {len(findings)} finding"
+                            f"{'s' if len(findings) != 1 else ''} below critical."
+                            if findings else
+                            "No findings crossed the reporting threshold."),
+            "aiEngine": {"provider": "Ollama (local)", "model": "llama3.2:3b",
                          "status": "online" if analysis else "idle",
-                         "fallback": "Claude API → Rule-based"},
+                         "fallback": "Local → Cloud key (if set) → Rule-based"},
             "pipeline": pipeline,
         },
         "evidence": ev_ui,
         "events": events,
         "findings": findings,
-        "narrative": {
-            "generated": pipeline.get("lastRun", "—"),
-            "engine": "OpenClaw → Ollama · llama3.2:3b (local)",
-            "sections": sections,
-        },
         "audit": list(audit),
+        "paragraph": None,          # CaseScreen writes its own summary instead
+        "report": {
+            "title": REPORT_TITLE,
+            "byline": (f"Examiner {meta['examiner']} ({meta['examinerId']}) · "
+                       f"Generated {now} · Drafted by the local model, "
+                       f"reviewed by the examiner"),
+            "summary": _summary(analysis, findings, evidence, pipeline),
+            "footer": (f"The exported PDF embeds the SHA-256 of all "
+                       f"{len(evidence)} artifact(s) and the full audit trail.\n"
+                       f"Evidence was mounted read-only throughout the examination."),
+            "order": [f["id"] for f in findings],
+            "include": {f["id"]: True for f in findings},
+        },
     }
+
+
+def _summary(analysis, findings, evidence, pipeline):
+    """The report's executive summary: the model's narrative if it wrote one,
+    otherwise a factual statement of what was examined and found."""
+    md = (analysis.get("narrative") or "").strip()
+    if md:
+        # First real paragraph of the generated markdown.
+        for block in md.split("\n\n"):
+            text = " ".join(l.strip() for l in block.splitlines()
+                            if l.strip() and not l.strip().startswith(("#", "-", "*")))
+            if len(text) > 80:
+                return text
+    crit = sum(1 for f in findings if f["sev"] == "CRITICAL")
+    return (f"{len(evidence)} artifact(s) were examined and parsed into "
+            f"{pipeline.get('eventsParsed', 0):,} events. The analysis produced "
+            f"{len(findings)} finding(s)"
+            f"{f', {crit} of them critical' if crit else ''}. "
+            f"Each finding below states what was observed and which artifacts "
+            f"support it.")

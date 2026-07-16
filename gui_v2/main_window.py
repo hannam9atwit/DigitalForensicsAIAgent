@@ -1,44 +1,47 @@
 """
 gui_v2/main_window.py
 
-Native PySide6 main window. No server, no browser — pure Qt widgets.
+The application shell: menu bar, sidebar, screen stack, explainer rail, status
+bar — and the wiring between them.
 
-Launches into an EMPTY state (no demo data). The examiner creates a case via
-File > New Case, adds one or more evidence files (disk / browser / Event Log /
-Registry / Prefetch / PCAP / email), and the app hashes them on intake, runs
-every artifact through its parser on a background thread, merges one timeline,
-reasons over it, and rebuilds all six screens from the live result.
+The window owns app-level state (which case is open, which screen is showing)
+and resolves navigation. Screens own their own selection. When a screen's
+selection changes it emits a RailPayload and the window hands it to the rail;
+when a screen wants to send the user somewhere it emits navigate(id, arg) and
+the window resolves it. Nothing else knows the rail exists.
+
+Three states: no case (launch), analyzing (pipeline progress), case open (the
+full shell). The sidebar and rail only exist in the third — with no case there
+is nothing for them to say.
 """
 
 import os
 
 from PySide6.QtCore import Qt, QThread, Signal, QObject
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QPushButton,
-    QFrame, QStackedWidget, QStatusBar, QDialog, QLineEdit,
-    QDialogButtonBox, QMessageBox, QProgressDialog, QFileDialog,
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QStackedWidget,
+    QStatusBar, QMessageBox, QProgressDialog, QFileDialog, QFrame,
 )
 
-from . import theme, screens
+from . import theme, widgets as w, content
 from .case_model import empty_case
 from .intake_dialog import IntakeDialog, EVIDENCE_FILTER
-from .widgets import MicroLabel
+from .rail import ExplainerRail, RailPayload
+from .sidebar import Sidebar
+from .screens import (
+    CaseScreen, FindingsScreen, EvidenceScreen, TimelineScreen, ReportScreen,
+    ChatScreen, AuditScreen, SettingsScreen, LaunchScreen, AnalyzingScreen,
+)
 
-NAV = [
-    ("dashboard", "Dashboard", "1"),
-    ("evidence",  "Evidence",  "2"),
-    ("timeline",  "Timeline",  "3"),
-    ("findings",  "Findings",  "4"),
-    ("narrative", "AI Narrative", "5"),
-    ("audit",     "Audit Log", "6"),
-]
+P = theme.GUIDED
 
 
 class AnalysisWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
     log = Signal(str)
+    stage = Signal(int)
 
     def __init__(self, builder, api_key=""):
         super().__init__()
@@ -49,89 +52,50 @@ class AnalysisWorker(QObject):
         try:
             if self.api_key:
                 os.environ["ANTHROPIC_API_KEY"] = self.api_key
-            self.builder.analyze(log=self.log.emit)
+            self.builder.analyze(log=self._log)
             self.finished.emit(self.builder)
         except Exception as e:
             import traceback
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent, settings):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setMinimumWidth(460)
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Default examiner name"))
-        self.examiner = QLineEdit(settings.get("examiner", ""))
-        lay.addWidget(self.examiner)
-        lay.addWidget(QLabel("Default examiner ID"))
-        self.examiner_id = QLineEdit(settings.get("examiner_id", ""))
-        lay.addWidget(self.examiner_id)
-        lay.addWidget(QLabel("Default agency / organisation"))
-        self.agency = QLineEdit(settings.get("agency", ""))
-        lay.addWidget(self.agency)
-        lay.addWidget(QLabel("Anthropic API key (optional - for Claude narrative)"))
-        self.api_key = QLineEdit(settings.get("anthropic_api_key", ""))
-        self.api_key.setEchoMode(QLineEdit.Password)
-        self.api_key.setPlaceholderText("sk-ant-...  (blank = local Ollama / rule-based)")
-        lay.addWidget(self.api_key)
-        note = QLabel("Key is held in memory only - never written to disk.")
-        note.setStyleSheet("color: gray; font-size: 11px;")
-        lay.addWidget(note)
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-    def values(self):
-        return {
-            "examiner": self.examiner.text().strip(),
-            "examiner_id": self.examiner_id.text().strip(),
-            "agency": self.agency.text().strip(),
-            "anthropic_api_key": self.api_key.text().strip(),
-        }
+    def _log(self, msg):
+        """Map the pipeline's log lines onto the five stages the analyzing
+        screen shows, so its progress reflects real work rather than a timer."""
+        self.log.emit(msg)
+        m = msg.lower()
+        if "hashing" in m:
+            self.stage.emit(0)
+        elif "parsing" in m:
+            self.stage.emit(1)
+        elif "unified timeline" in m or "interpreted events" in m:
+            self.stage.emit(2)
+        elif "finding" in m or "rule" in m:
+            self.stage.emit(3)
+        elif "narrative" in m:
+            self.stage.emit(4)
 
 
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Forensic AI Agent - Examiner Console")
-        self.setMinimumSize(1240, 800)
-        self.is_dark = True
-        self.pal = theme.DARK
+        self.setWindowTitle("Forensic AI Agent")
+        self.resize(1440, 900)
+        self.setMinimumSize(1100, 700)
+
         self.builder = None
         self.case = empty_case()
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
                          "anthropic_api_key": ""}
-        self.nav_buttons = {}
+        self.screens = {}
         self._current = None
+
+        self.setStyleSheet(theme.stylesheet(P))
         self._build_menu()
         self._build_ui()
-        self._apply_theme()
-        self._show_empty()
+        self.show_launch()
 
-    def _build_menu(self):
-        mb = self.menuBar()
-        fm = mb.addMenu("File")
-        fm.addAction(QAction("New Case...", self, triggered=self.new_case))
-        fm.addAction(QAction("Open Previous Case...", self, triggered=self.open_case_history))
-        fm.addAction(QAction("Add Evidence...", self, triggered=self.add_evidence))
-        fm.addAction(QAction("Save Case", self, triggered=self.save_case))
-        fm.addSeparator()
-        fm.addAction(QAction("Export Selected Evidence...", self, triggered=lambda: self._export_evidence(None)))
-        fm.addAction(QAction("Generate PDF Report...", self, triggered=self._generate_report))
-        fm.addSeparator()
-        fm.addAction(QAction("Exit", self, triggered=self.close))
-        tm = mb.addMenu("Tools")
-        tm.addAction(QAction("Run / Re-run Analysis", self, triggered=self.run_analysis))
-        tm.addAction(QAction("Re-verify Hashes", self, triggered=self._verify_hashes))
-        tm.addAction(QAction("Settings...", self, triggered=self.open_settings))
-        vm = mb.addMenu("View")
-        self.theme_action = QAction("Light Mode", self, checkable=True,
-                                    triggered=self.toggle_theme)
-        vm.addAction(self.theme_action)
+    # ── shell ─────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         central = QWidget()
@@ -139,126 +103,278 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.sidebar = self._build_sidebar()
+
+        self.sidebar = Sidebar(content.STEPS, content.EXTRAS)
+        self.sidebar.navigate.connect(lambda sid: self.go(sid))
         root.addWidget(self.sidebar)
+
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
+
+        self.rail = ExplainerRail()
+        self.rail.chip_clicked.connect(self._resolve_ref)
+        root.addWidget(self.rail)
+
         self.setStatusBar(QStatusBar())
+        self._status_right = QLabel("")
+        self._status_right.setStyleSheet(
+            f"color: {P['text3']}; font-family: {theme.MONO_STACK}; font-size: 10px;")
+        self.statusBar().addPermanentWidget(self._status_right)
         self._refresh_status()
 
-    def _build_sidebar(self):
-        bar = QFrame(); bar.setObjectName("sidebar"); bar.setFixedWidth(226)
-        lay = QVBoxLayout(bar); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
-        brand = QWidget(); bl = QVBoxLayout(brand); bl.setContentsMargins(14, 14, 14, 12)
-        name = QLabel("FORENSIC AI AGENT")
-        name.setStyleSheet("font-size:13px; font-weight:700; letter-spacing:1px;")
-        ver = QLabel("v2.0 - EXAMINER CONSOLE")
-        ver.setStyleSheet(f"font-family:{theme.MONO}; font-size:9px; color:{self.pal['text3']};")
-        bl.addWidget(name); bl.addWidget(ver)
-        lay.addWidget(brand)
-        lay.addWidget(self._sep())
-        self.case_block = QWidget()
-        lay.addWidget(self.case_block)
-        self._fill_case_block()
-        lay.addWidget(self._sep())
-        nav_wrap = QWidget()
-        nl = QVBoxLayout(nav_wrap); nl.setContentsMargins(0, 8, 0, 8); nl.setSpacing(1)
-        for sid, label, key in NAV:
-            btn = QPushButton(f"  {label}")
-            btn.setObjectName("navItem")
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, s=sid: self._show_screen(s))
-            btn.setShortcut(key)
-            self.nav_buttons[sid] = btn
-            nl.addWidget(btn)
-        lay.addWidget(nav_wrap)
-        lay.addStretch(1)
-        lay.addWidget(self._sep())
-        foot = QWidget(); fl = QVBoxLayout(foot)
-        fl.setContentsMargins(14, 10, 14, 12); fl.setSpacing(6)
-        self.ai_label = QLabel("o OLLAMA - LLAMA3.2:3B")
-        self.ai_label.setStyleSheet(f"color:{self.pal['text3']}; font-family:{theme.MONO}; font-size:10px;")
-        ofl = QLabel("LOCAL - OFFLINE")
-        ofl.setStyleSheet(f"color:{self.pal['text3']}; font-family:{theme.MONO}; font-size:9px;")
-        fl.addWidget(self.ai_label); fl.addWidget(ofl)
-        self.examiner_label = QLabel("")
-        self.examiner_label.setStyleSheet(f"color:{self.pal['text2']}; font-family:{theme.MONO}; font-size:9px;")
-        fl.addWidget(self.examiner_label)
-        lay.addWidget(foot)
-        return bar
+    def _build_menu(self):
+        mb = self.menuBar()
+        # Hold a reference: passing the corner widget as a temporary lets Python
+        # drop it before Qt takes ownership, and it is silently destroyed.
+        self._corner = self._menu_corner()
+        mb.setCornerWidget(self._corner, Qt.TopRightCorner)
 
-    def _fill_case_block(self):
-        if self.case_block.layout():
-            old = self.case_block.layout()
-            while old.count():
-                it = old.takeAt(0)
-                if it.widget():
-                    it.widget().deleteLater()
-            QWidget().setLayout(old)
-        cl = QVBoxLayout(self.case_block)
-        cl.setContentsMargins(14, 10, 14, 10); cl.setSpacing(2)
-        cl.addWidget(MicroLabel("Active case"))
-        meta = self.case["caseMeta"]
-        cid = QLabel(meta["id"])
-        cid.setStyleSheet(f"color:{self.pal['accent']}; font-family:{theme.MONO}; "
-                          f"font-size:13px; font-weight:700;")
-        title = QLabel(meta["title"]); title.setWordWrap(True)
-        title.setStyleSheet(f"color:{self.pal['text2']}; font-size:11px;")
-        cl.addWidget(cid); cl.addWidget(title)
+        fm = mb.addMenu("File")
+        fm.addAction(QAction("New Case…", self, triggered=self.new_case,
+                             shortcut=QKeySequence.New))
+        fm.addAction(QAction("Open Case…", self, triggered=self.open_case_history,
+                             shortcut=QKeySequence.Open))
+        fm.addAction(QAction("Add Evidence…", self, triggered=self.add_evidence))
+        fm.addAction(QAction("Save Case", self, triggered=self.save_case,
+                             shortcut=QKeySequence.Save))
+        fm.addSeparator()
+        fm.addAction(QAction("Export Report PDF…", self, triggered=self.export_report))
+        fm.addAction(QAction("Export Selected Evidence…", self,
+                             triggered=lambda: self._export_evidence(None)))
+        fm.addSeparator()
+        fm.addAction(QAction("Exit", self, triggered=self.close))
 
-    def _sep(self):
-        f = QFrame(); f.setFixedHeight(1)
-        f.setStyleSheet(f"background:{self.pal['line']};")
-        return f
+        cm = mb.addMenu("Case")
+        cm.addAction(QAction("Run / Re-run Analysis", self, triggered=self.run_analysis))
+        cm.addAction(QAction("Re-verify Hashes", self, triggered=self.verify_hashes))
+        cm.addSeparator()
+        cm.addAction(QAction("Open Demo Case", self, triggered=self.open_demo))
+
+        vm = mb.addMenu("View")
+        for i, (sid, label, _sub) in enumerate(content.STEPS, start=1):
+            vm.addAction(QAction(label, self, shortcut=QKeySequence(str(i)),
+                                 triggered=lambda _=False, s=sid: self.go(s)))
+
+        tm = mb.addMenu("Tools")
+        tm.addAction(QAction("Ask the AI", self, triggered=lambda: self.go("chat")))
+        tm.addAction(QAction("Audit Trail", self, triggered=lambda: self.go("audit")))
+        tm.addAction(QAction("Settings", self, triggered=lambda: self.go("settings")))
+
+        hm = mb.addMenu("Help")
+        hm.addAction(QAction("About", self, triggered=self._about))
+
+    def _menu_corner(self):
+        """Right side of the menu bar: the open case, then the offline state."""
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 12, 0)
+        h.setSpacing(14)
+        self._menu_case = QLabel("")
+        self._menu_case.setStyleSheet(
+            f"color: {P['text3']}; font-family: {theme.MONO_STACK}; font-size: 10px;")
+        h.addWidget(self._menu_case)
+        offline = QLabel("● OFFLINE · LOCAL AI")
+        offline.setStyleSheet(
+            f"color: {P['good']}; font-family: {theme.MONO_STACK}; "
+            f"font-size: 10px; font-weight: 600;")
+        h.addWidget(offline)
+        return box
+
+    # ── app states ────────────────────────────────────────────────────────────
 
     def _clear_stack(self):
         while self.stack.count():
-            w = self.stack.widget(0)
-            self.stack.removeWidget(w)
-            w.deleteLater()
+            wdg = self.stack.widget(0)
+            self.stack.removeWidget(wdg)
+            wdg.deleteLater()
+        self.screens.clear()
 
-    def _show_empty(self):
+    def show_launch(self):
         self._clear_stack()
-        self.stack.addWidget(screens.empty_state(self.pal, self.new_case))
-        for btn in self.nav_buttons.values():
-            btn.setEnabled(False)
+        self.sidebar.hide()
+        self.rail.hide()
+        launch = LaunchScreen(self._recent_cases())
+        launch.new_case.connect(self.new_case)
+        launch.open_case.connect(self._open_recent)
+        self.stack.addWidget(launch)
         self._current = None
+        self._refresh_status()
 
-    def _show_screen(self, sid):
-        if not self.case.get("loaded"):
-            return
-        builders = {
-            "dashboard": lambda: screens.dashboard(self.case, self.pal),
-            "evidence":  lambda: screens.evidence(self.case, self.pal,
-                                                  on_verify=self._verify_hashes,
-                                                  on_export=self._export_evidence,
-                                                  on_report=self._generate_report),
-            "timeline":  lambda: screens.timeline(self.case, self.pal),
-            "findings":  lambda: screens.findings(self.case, self.pal),
-            "narrative": lambda: screens.narrative(self.case, self.pal),
-            "audit":     lambda: screens.audit(self.case, self.pal),
-        }
+    def _recent_cases(self):
+        """Real saved cases, newest first, shaped for the history card.
+
+        The demo case is appended when the machine has no cases yet, so a fresh
+        install has something to open rather than an empty panel.
+        """
+        out = []
+        try:
+            from .case_store import list_cases
+            for c in list_cases():
+                n_f = c.get("findings", 0)
+                n_e = c.get("evidence", 0)
+                artifacts = f"{n_e} artifact{'' if n_e == 1 else 's'}"
+                findings = f"{n_f} finding{'' if n_f == 1 else 's'}"
+                meta = (f"Saved {c.get('saved','—')} · {findings} · {artifacts}"
+                        if c.get("analyzed") else
+                        f"Saved {c.get('saved','—')} · not yet analyzed · {artifacts}")
+                out.append({
+                    "id": c.get("id", "—"),
+                    "title": c.get("title", "Untitled"),
+                    "meta": meta,
+                    "risk": findings.upper() if c.get("analyzed") else "NEW",
+                    "hot": n_f > 0,
+                    "path": c.get("path"),
+                })
+        except Exception:
+            pass
+        if not out:
+            demo = dict(content.RECENT_CASES[0])
+            demo["path"] = "__demo__"
+            demo["meta"] = "Demo fixture · 7 findings · 5 artifacts"
+            out.append(demo)
+        return out
+
+    def _open_recent(self, path):
+        if path == "__demo__":
+            self.open_demo()
+        elif path:
+            self._load_case_file(path)
+        else:
+            self.open_case_history()
+
+    def open_demo(self):
+        self.builder = None
+        self.case = content.demo_case()
+        self._enter_case()
+        self.go("case")
+        self.statusBar().showMessage(
+            "Demo case loaded — FA-2026-0142 (fixture data, no real evidence)", 6000)
+
+    def _enter_case(self):
+        """Build the case screens and show the full shell."""
         self._clear_stack()
-        self.stack.addWidget(builders[sid]())
-        for s, btn in self.nav_buttons.items():
-            btn.setEnabled(True)
-            btn.setObjectName("navItemActive" if s == sid else "navItem")
-            btn.style().unpolish(btn); btn.style().polish(btn)
+        self.sidebar.show()
+        self.rail.show()
+
+        self.screens = {
+            "case": CaseScreen(self.case),
+            "evidence": EvidenceScreen(self.case),
+            "timeline": TimelineScreen(self.case),
+            "findings": FindingsScreen(self.case),
+            "report": ReportScreen(self.case),
+            "chat": ChatScreen(self.case),
+            "audit": AuditScreen(self.case),
+            "settings": SettingsScreen(self.case, self.settings),
+        }
+        for s in self.screens.values():
+            self.stack.addWidget(s)
+            s.rail_changed.connect(self.rail.set_payload)
+            s.navigate.connect(self.go)
+
+        self.screens["report"].export_requested.connect(self.export_report)
+        self.screens["chat"].asked.connect(self._log_question)
+
+        self._refresh_sidebar()
+        self._refresh_status()
+
+    def show_analyzing(self):
+        self._clear_stack()
+        self.sidebar.hide()
+        self.rail.hide()
+        self._analyzing = AnalyzingScreen()
+        self.stack.addWidget(self._analyzing)
+        self._refresh_status(analyzing=True)
+
+    # ── navigation ────────────────────────────────────────────────────────────
+
+    def go(self, sid, arg=None):
+        if sid not in self.screens:
+            return
+        self.stack.setCurrentWidget(self.screens[sid])
+        self.sidebar.set_active(sid)
         self._current = sid
+        self.screens[sid].on_show(arg)
+
+    def _resolve_ref(self, ref):
+        """Rail chips carry a bare reference; the window knows where it points."""
+        if ref == "TL":
+            self.go("timeline", "Jun 3 19:18:47")
+        elif ref.startswith("F-"):
+            self.go("findings", ref)
+        elif ref.startswith("EV-"):
+            self.go("evidence", ref)
+
+    # ── sidebar / status ──────────────────────────────────────────────────────
+
+    def _refresh_sidebar(self):
+        meta = self.case.get("caseMeta", {})
+        ev = self.case.get("evidence", [])
+        f = self.case.get("findings", [])
+        verified = sum(1 for e in ev if e.get("verified"))
+        crit = sum(1 for x in f if str(x.get("sev", "")).upper() == "CRITICAL")
+        events = meta.get("pipeline", {}).get("eventsParsed", 0)
+
+        risk = meta.get("riskScore", 0)
+        risk_label = meta.get("riskLabel", "—")
+        self.sidebar.set_sub("case", f"Risk {risk} · {str(risk_label).lower()}")
+        self.sidebar.set_sub(
+            "evidence",
+            f"{len(ev)} artifact{'' if len(ev) == 1 else 's'} · {verified} verified")
+        self.sidebar.set_sub("timeline",
+                             f"{events:,} event{'' if events == 1 else 's'}")
+        self.sidebar.set_sub(
+            "findings",
+            f"{len(f)} finding{'' if len(f) == 1 else 's'} · {crit} critical"
+            if f else "No findings")
+        self.sidebar.set_sub("report", "Draft ready" if f else "Nothing to report")
+        self.sidebar.risk.set_risk(
+            risk, risk_label,
+            meta.get("riskCaption") or self._risk_caption(f))
+
+    def _risk_caption(self, findings):
+        crit = sum(1 for x in findings if str(x.get("sev", "")).upper() == "CRITICAL")
+        if crit:
+            return f"Driven by {crit} critical finding{'s' if crit > 1 else ''}."
+        if findings:
+            return f"Based on {len(findings)} finding(s) below critical."
+        return "No findings crossed the reporting threshold."
+
+    def _refresh_status(self, analyzing=False):
+        sb = self.statusBar()
+        if analyzing:
+            sb.showMessage("● PIPELINE RUNNING")
+            self._status_right.setText("")
+            self._menu_case.setText("")
+            return
+        if not self.case.get("loaded"):
+            sb.showMessage("NO CASE LOADED — FILE ▸ NEW CASE TO BEGIN")
+            self._status_right.setText("")
+            self._menu_case.setText("")
+            return
+
+        meta = self.case.get("caseMeta", {})
+        ev = self.case.get("evidence", [])
+        verified = sum(1 for e in ev if e.get("verified"))
+        sb.showMessage("● READ-ONLY EVIDENCE   ·   NOTHING IS EXECUTED   ·   "
+                       "CHAIN OF CUSTODY INTACT")
+        self._status_right.setText(
+            f"SHA-256 · {len(ev)} REGISTERED · {verified} VERIFIED     OFFLINE")
+        self._menu_case.setText(f"{meta.get('id','—')} · {meta.get('title','')}")
+
+    # ── case lifecycle ────────────────────────────────────────────────────────
 
     def new_case(self):
         dlg = IntakeDialog(self, self.settings)
         if not dlg.exec():
             return
-        prog = self._progress("Hashing evidence on intake...")
+        prog = self._progress("Hashing evidence on intake…")
         try:
             self.builder = dlg.build(log=lambda m: self.statusBar().showMessage(m))
         finally:
             prog.close()
         self.case = self.builder.to_case()
-        self._fill_case_block()
-        self._refresh_status()
-        self._show_screen("evidence")
+        self._enter_case()
+        self.go("evidence")
         if QMessageBox.question(
                 self, "Run analysis",
                 f"{len(self.builder.evidence)} artifact(s) hashed and registered.\n"
@@ -268,34 +384,35 @@ class MainWindow(QMainWindow):
     def add_evidence(self):
         if not self.builder:
             QMessageBox.information(self, "No case",
-                                    "Create a case first (File > New Case).")
+                                    "Create a case first (File ▸ New Case).")
             return
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Add Evidence Files", "", EVIDENCE_FILTER)
         if not paths:
             return
-        prog = self._progress("Hashing evidence on intake...")
+        prog = self._progress("Hashing evidence on intake…")
         try:
             for p in paths:
-                self.statusBar().showMessage(f"Hashing {os.path.basename(p)}...")
+                self.statusBar().showMessage(f"Hashing {os.path.basename(p)}…")
                 self.builder.add_evidence(p)
         finally:
             prog.close()
         self.case = self.builder.to_case()
-        self._show_screen("evidence")
-        self._refresh_status()
+        self._enter_case()
+        self.go("evidence")
 
     def run_analysis(self):
         if not self.builder or not self.builder.evidence:
             QMessageBox.information(self, "Nothing to analyze",
                                     "Create a case and add evidence first.")
             return
-        self.prog = self._progress("Running analysis pipeline...")
+        self.show_analyzing()
         self.thread = QThread()
-        self.worker = AnalysisWorker(self.builder, self.settings.get("anthropic_api_key", ""))
+        self.worker = AnalysisWorker(self.builder,
+                                     self.settings.get("anthropic_api_key", ""))
         self.worker.moveToThread(self.thread)
-        self.worker.log.connect(lambda m: (self.statusBar().showMessage(m),
-                                           self.prog.setLabelText(m)))
+        self.worker.log.connect(self._analysis_log)
+        self.worker.stage.connect(lambda n: self._analyzing.set_step(n))
         self.worker.finished.connect(self._analysis_done)
         self.worker.error.connect(self._analysis_error)
         self.thread.started.connect(self.worker.run)
@@ -303,119 +420,51 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.thread.quit)
         self.thread.start()
 
+    def _analysis_log(self, msg):
+        self.statusBar().showMessage(f"● PIPELINE RUNNING — {msg}")
+        if getattr(self, "_analyzing", None):
+            self._analyzing.set_log(msg)
+
     def _analysis_done(self, builder):
-        self.prog.close()
         self.builder = builder
         self.case = builder.to_case()
-        self.ai_label.setText("* OLLAMA - LLAMA3.2:3B")
-        self.ai_label.setStyleSheet(f"color:{self.pal['good']}; font-family:{theme.MONO}; font-size:10px;")
-        self._fill_case_block()
-        self._show_screen("dashboard")
-        self._refresh_status()
-        # auto-save to case history so it's available next session
+        self._enter_case()
+        self.go("case")
         try:
             from .case_store import save_case
             save_case(self.builder)
         except Exception:
             pass
         self.statusBar().showMessage(
-            f"Analysis complete - {self.case['caseMeta']['id']} - "
+            f"Analysis complete — {self.case['caseMeta']['id']} — "
             f"{len(self.case['findings'])} findings", 8000)
 
     def _analysis_error(self, msg):
-        self.prog.close()
+        # Keep the case open on Evidence rather than dropping the examiner back
+        # to an empty launch screen — the artifacts are still registered.
+        if self.builder:
+            self.case = self.builder.to_case()
+            self._enter_case()
+            self.go("evidence")
+        else:
+            self.show_launch()
         QMessageBox.critical(self, "Analysis failed", msg.split("\n")[0])
-        self.statusBar().showMessage("Analysis failed - see message", 6000)
+        self.statusBar().showMessage("Analysis failed — evidence is still registered",
+                                     8000)
 
-    def _verify_hashes(self):
+    def verify_hashes(self):
         if not self.builder:
+            QMessageBox.information(self, "No case", "Open a real case first.")
             return
         results = self.builder.reverify()
         self.case = self.builder.to_case()
-        self._show_screen("evidence")
+        self._enter_case()
+        self.go("evidence")
         ok = sum(1 for v in results.values() if v)
         self.statusBar().showMessage(
             f"Re-verified {ok}/{len(results)} artifact(s) OK", 5000)
 
-    # ── evidence export ────────────────────────────────────────────────────────
-
-    def _export_evidence(self, selected):
-        if not self.builder or not self.builder.evidence:
-            QMessageBox.information(self, "No evidence", "Create a case with evidence first.")
-            return
-        # if called from the menu (selected is None), export everything
-        items = selected if selected else self.builder.evidence
-        if not items:
-            QMessageBox.information(self, "Nothing selected",
-                                    "Tick at least one artifact to export.")
-            return
-        dest = QFileDialog.getExistingDirectory(self, "Choose export destination")
-        if not dest:
-            return
-        from .evidence_export import export_evidence
-        prog = self._progress("Copying & re-hashing evidence...")
-        try:
-            res = export_evidence(items, dest, self.case["caseMeta"],
-                                  log=lambda m: self.statusBar().showMessage(m))
-            if self.builder:
-                self.builder._log("EVIDENCE_EXPORTED",
-                                  f"{res['ok']}/{res['total']} artifact(s) exported to {dest}",
-                                  who=self.settings.get("examiner") or "examiner")
-                self.case = self.builder.to_case()
-        finally:
-            prog.close()
-        QMessageBox.information(
-            self, "Export complete",
-            f"Exported {res['ok']}/{res['total']} artifact(s).\n"
-            f"All copies re-hashed against intake SHA-256.\n\n"
-            f"Manifest:\n{res['text']}")
-        self.statusBar().showMessage(
-            f"Exported {res['ok']}/{res['total']} artifact(s) to {dest}", 6000)
-
-    # ── PDF report ─────────────────────────────────────────────────────────────
-
-    def _generate_report(self):
-        if not self.case.get("loaded"):
-            QMessageBox.information(self, "No case", "Create and analyze a case first.")
-            return
-        if not self.case.get("findings"):
-            if QMessageBox.question(
-                    self, "No findings yet",
-                    "This case has no findings (has it been analyzed?).\n"
-                    "Generate the report anyway?") != QMessageBox.Yes:
-                return
-        default = f"{self.case['caseMeta']['id']}_report.pdf"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save PDF Report", default, "PDF files (*.pdf)")
-        if not path:
-            return
-        if not path.endswith(".pdf"):
-            path += ".pdf"
-        try:
-            from .report_pdf import generate_report
-            prog = self._progress("Building PDF report...")
-            try:
-                generate_report(self.case, path)
-            finally:
-                prog.close()
-            if self.builder:
-                self.builder._log("REPORT_GENERATED",
-                                  f"PDF report written to {path}", who="system")
-                self.case = self.builder.to_case()
-        except ImportError:
-            QMessageBox.warning(self, "reportlab missing",
-                                "PDF reports need reportlab:\n\npip install reportlab")
-            return
-        except Exception as e:
-            QMessageBox.critical(self, "Report failed", str(e))
-            return
-        # offer to open it
-        if QMessageBox.question(
-                self, "Report ready",
-                f"Report saved:\n{path}\n\nOpen it now?") == QMessageBox.Yes:
-            self._open_path(path)
-
-    # ── case persistence ───────────────────────────────────────────────────────
+    # ── persistence ───────────────────────────────────────────────────────────
 
     def save_case(self):
         if not self.builder:
@@ -430,24 +479,131 @@ class MainWindow(QMainWindow):
         from .case_history import CaseHistoryDialog
         dlg = CaseHistoryDialog(self)
         if dlg.exec() and dlg.selected_path:
-            from .case_store import load_case
+            self._load_case_file(dlg.selected_path)
+
+    def _load_case_file(self, path):
+        from .case_store import load_case
+        try:
+            self.builder = load_case(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Open failed", str(e))
+            return
+        self.case = self.builder.to_case()
+        self._enter_case()
+        self.go("case" if self.case.get("findings") else "evidence")
+        self.statusBar().showMessage(
+            f"Opened case {self.case['caseMeta']['id']}", 5000)
+
+    # ── report / evidence export ──────────────────────────────────────────────
+
+    def export_report(self):
+        if not self.case.get("loaded"):
+            QMessageBox.information(self, "No case", "Open a case first.")
+            return
+        default = f"{self.case['caseMeta']['id']}_report.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF Report", default, "PDF files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+
+        rep = self.screens.get("report")
+        case_for_pdf = dict(self.case)
+        if rep:
+            # Take the screen's own list: it carries the examiner's inclusions
+            # *and* the report order, which a re-filter of self.case would drop.
+            case_for_pdf["findings"] = rep.included_findings()
+            case_for_pdf["examinerNotes"] = rep.notes
+
+        try:
+            from .report_pdf import generate_report
+            prog = self._progress("Building PDF report…")
             try:
-                self.builder = load_case(dlg.selected_path)
-            except Exception as e:
-                QMessageBox.critical(self, "Open failed", str(e))
-                return
+                generate_report(case_for_pdf, path)
+            finally:
+                prog.close()
+        except ImportError:
+            QMessageBox.warning(self, "reportlab missing",
+                                "PDF reports need reportlab:\n\npip install reportlab")
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "Report failed", str(e))
+            return
+
+        self._audit("REPORT_EXPORTED",
+                    f"{os.path.basename(path)} · "
+                    f"{len(case_for_pdf['findings'])} findings included",
+                    kind="user")
+        if rep:
+            rep.mark_exported(os.path.basename(path))
+        self.statusBar().showMessage(f"Report exported — {path}", 6000)
+        if QMessageBox.question(self, "Report ready",
+                                f"Report saved:\n{path}\n\nOpen it now?") == \
+                QMessageBox.Yes:
+            self._open_path(path)
+
+    def _export_evidence(self, selected):
+        if not self.builder or not self.builder.evidence:
+            QMessageBox.information(self, "No evidence",
+                                    "Open a real case with evidence first.")
+            return
+        items = selected or self.builder.evidence
+        dest = QFileDialog.getExistingDirectory(self, "Choose export destination")
+        if not dest:
+            return
+        from .evidence_export import export_evidence
+        prog = self._progress("Copying & re-hashing evidence…")
+        try:
+            res = export_evidence(items, dest, self.case["caseMeta"],
+                                  log=lambda m: self.statusBar().showMessage(m))
+            self.builder._log("EVIDENCE_EXPORTED",
+                              f"{res['ok']}/{res['total']} artifact(s) exported to {dest}",
+                              who=self.settings.get("examiner") or "examiner")
             self.case = self.builder.to_case()
-            self._fill_case_block()
-            self._refresh_status()
-            if self.case.get("findings"):
-                self._show_screen("dashboard")
-            else:
-                self._show_screen("evidence")
-            self.statusBar().showMessage(
-                f"Opened case {self.case['caseMeta']['id']}", 5000)
+        finally:
+            prog.close()
+        QMessageBox.information(
+            self, "Export complete",
+            f"Exported {res['ok']}/{res['total']} artifact(s).\n"
+            f"All copies re-hashed against intake SHA-256.")
+
+    # ── audit ─────────────────────────────────────────────────────────────────
+
+    def _audit(self, act, detail, kind="user"):
+        """Append to the trail. The demo case holds dicts; a real case's trail
+        lives on the builder and is re-read through to_case()."""
+        who = self.settings.get("examiner") or self.case.get(
+            "caseMeta", {}).get("examiner", "examiner")
+        if self.builder:
+            self.builder._log(act, detail, who=who)
+            self.case = self.builder.to_case()
+            if "audit" in self.screens:
+                self.screens["audit"].case = self.case
+        else:
+            import datetime
+            self.case.setdefault("audit", []).append({
+                "ts": datetime.datetime.now().strftime("%b %d %H:%M:%S"),
+                "who": who, "act": act, "detail": detail, "kind": kind,
+            })
+        if "audit" in self.screens:
+            self.screens["audit"].refresh()
+
+    def _log_question(self, text):
+        self._audit("AI_QUESTION", f"Examiner asked: “{text[:70]}”", kind="user")
+
+    # ── misc ──────────────────────────────────────────────────────────────────
+
+    def _about(self):
+        QMessageBox.about(
+            self, "Forensic AI Agent",
+            "Forensic AI Agent\n\n"
+            "An offline digital forensics investigation platform.\n"
+            "Evidence is hashed on intake, opened read-only, and never executed.\n"
+            "The AI narrative runs on a local model by default.")
 
     def _open_path(self, path):
-        import sys, subprocess, os
+        import sys, subprocess
         try:
             if sys.platform.startswith("win"):
                 os.startfile(path)  # noqa
@@ -458,28 +614,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def open_settings(self):
-        dlg = SettingsDialog(self, self.settings)
-        if dlg.exec():
-            self.settings.update(dlg.values())
-            self.examiner_label.setText(
-                f"{self.settings['examiner'].upper()} - {self.settings['examiner_id']}"
-                if self.settings['examiner'] else "")
-
-    def toggle_theme(self, light):
-        self.is_dark = not light
-        self.pal = theme.LIGHT if light else theme.DARK
-        self._apply_theme()
-        self.centralWidget().deleteLater()
-        self._build_ui()
-        if self.case.get("loaded"):
-            self._show_screen(self._current or "dashboard")
-        else:
-            self._show_empty()
-
-    def _apply_theme(self):
-        self.setStyleSheet(theme.stylesheet(self.pal))
-
     def _progress(self, text):
         p = QProgressDialog(text, None, 0, 0, self)
         p.setWindowModality(Qt.WindowModal)
@@ -487,15 +621,3 @@ class MainWindow(QMainWindow):
         p.setCancelButton(None)
         p.show()
         return p
-
-    def _refresh_status(self):
-        meta = self.case["caseMeta"]
-        if not self.case.get("loaded"):
-            self.statusBar().showMessage("No case loaded - File > New Case to begin")
-            return
-        verified = sum(1 for e in self.case["evidence"] if e["verified"])
-        self.statusBar().showMessage(
-            f"PIPELINE {meta['pipeline']['status'].upper()} - "
-            f"EVENTS {meta['pipeline']['eventsParsed']:,} - "
-            f"HASHES {verified}/{len(self.case['evidence'])} VERIFIED - "
-            f"CHAIN INTACT - READ-ONLY EVIDENCE")

@@ -1,268 +1,261 @@
 """
 gui_v2/report_pdf.py
 
-Generates a professional forensic investigation report (PDF) populated from a
-case dict — the same shape the GUI screens render. Uses reportlab.
+The exported PDF — the actual deliverable the Report screen composes.
 
-Layout:
-  - Cover block (case id, title, examiner, agency, date, risk badge)
-  - Case summary stats (evidence / findings by severity / events)
-  - Chain of custody table (artifacts + SHA-256 + verified)
-  - AI narrative sections
-  - Findings detail (severity, MITRE, confidence, reasoning, evidence)
-  - Full timeline appendix
-  - Audit trail appendix
+It mirrors the paper preview rather than being a separate design: same serif
+headings, same rust accent, same section order, same footer. What the examiner
+saw is what they get.
+
+The document is written to be read by someone who is not a forensic examiner —
+a lawyer, HR, a court. So each finding leads with what happened in plain English
+and only then cites its technique and evidence, and the chain-of-custody and
+read-only statements are stated explicitly rather than assumed.
 
     pip install reportlab
 """
 
 import datetime
 
-SEV_LABEL = {4: "Critical", 3: "High", 2: "Medium", 1: "Low"}
-SEV_HEX = {4: "#C0392B", 3: "#D35400", 2: "#B7950B", 1: "#1E8449"}
-ACCENT = "#2C3E70"
+ACCENT = "#B3572D"
+TEXT = "#1B1B1F"
+TEXT2 = "#55555E"
+TEXT3 = "#8B8B96"
+LINE = "#E4E4EA"
+
+SEV_HEX = {
+    "CRITICAL": "#C24B51", "HIGH": "#C0763A", "MEDIUM": "#A88A3A", "LOW": "#3D8B63",
+    # tolerate the pipeline's numeric severities
+    4: "#C24B51", 3: "#C0763A", 2: "#A88A3A", 1: "#3D8B63",
+}
+SEV_LABEL = {4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}
 
 
-def _ev(ev, key):
-    """Read an event whether dict (current) or legacy tuple."""
+def _sev(f):
+    s = f.get("sev", "LOW")
+    return SEV_LABEL.get(s, s) if not isinstance(s, str) else s.upper()
+
+
+def _esc(t):
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _get(ev, key, default=""):
+    """Read an event whether it is a dict or a legacy tuple."""
     if isinstance(ev, dict):
-        return ev.get(key, "")
+        return ev.get(key, default)
     order = ["ts", "src", "label", "path", "sev", "fid"]
-    return ev[order.index(key)] if key in order and order.index(key) < len(ev) else ""
+    return ev[order.index(key)] if key in order and order.index(key) < len(ev) else default
 
 
 def generate_report(case: dict, out_path: str) -> str:
-    """Build the PDF at out_path from the case dict. Returns out_path."""
+    """Build the PDF at out_path from the case dict. Returns out_path.
+
+    `case["findings"]` is expected to be already filtered to what the examiner
+    chose to include; `case["examinerNotes"]` carries their remarks.
+    """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import cm
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-        HRFlowable, PageBreak,
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable,
+        PageBreak,
     )
 
-    meta = case["caseMeta"]
+    meta = case.get("caseMeta", {})
+    rep = case.get("report", {})
     findings = case.get("findings", [])
     evidence = case.get("evidence", [])
     events = case.get("events", [])
-    narrative = case.get("narrative", {})
     audit = case.get("audit", [])
-
-    sev_counts = {4: 0, 3: 0, 2: 0, 1: 0}
-    for f in findings:
-        sev_counts[f.get("sev", 1)] = sev_counts.get(f.get("sev", 1), 0) + 1
+    notes = (case.get("examinerNotes") or "").strip()
 
     base = getSampleStyleSheet()
 
     def st(name, parent="Normal", **kw):
         return ParagraphStyle(name, parent=base[parent], **kw)
 
-    s_cover = st("Cover", "Title", fontSize=22, textColor=colors.white,
-                 alignment=TA_CENTER, spaceAfter=2)
-    s_coversub = st("CoverSub", fontSize=11, textColor=colors.HexColor("#AEB7C8"),
-                    alignment=TA_CENTER)
-    s_h2 = st("H2", fontSize=14, textColor=colors.HexColor(ACCENT),
-              spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold")
-    s_h3 = st("H3", fontSize=11, textColor=colors.HexColor(ACCENT),
-              spaceBefore=8, spaceAfter=3, fontName="Helvetica-Bold")
-    s_body = st("Body", fontSize=9.5, leading=14, spaceAfter=6,
-                textColor=colors.HexColor("#1A1A2E"))
-    s_small = st("Small", fontSize=8, textColor=colors.HexColor("#555577"))
+    s_letter = st("Letter", fontName="Courier", fontSize=7.5,
+                  textColor=colors.HexColor(TEXT3), spaceAfter=6)
+    s_title = st("Title2", fontName="Times-Bold", fontSize=21,
+                 textColor=colors.HexColor(TEXT), spaceAfter=4, leading=25)
+    s_byline = st("Byline", fontSize=9, textColor=colors.HexColor(TEXT2),
+                  spaceAfter=8, leading=13)
+    s_h2 = st("H2", fontName="Times-Bold", fontSize=13.5,
+              textColor=colors.HexColor(TEXT), spaceBefore=16, spaceAfter=5)
+    s_body = st("Body", fontSize=9.5, leading=15, spaceAfter=5,
+                textColor=colors.HexColor(TEXT))
+    s_fname = st("FName", fontSize=10.5, leading=14, spaceAfter=2,
+                 textColor=colors.HexColor(TEXT))
+    s_src = st("Src", fontName="Courier", fontSize=7.5,
+               textColor=colors.HexColor(TEXT3), spaceAfter=9)
+    s_small = st("Small", fontSize=8, textColor=colors.HexColor(TEXT2), leading=12)
+    s_foot = st("Foot", fontName="Courier", fontSize=7,
+                textColor=colors.HexColor(TEXT3), leading=11)
+    # Table cells only wrap when they hold a Paragraph; a bare string overflows
+    # into the neighbouring column instead.
+    s_cell = st("Cell", fontSize=7, leading=9.5, textColor=colors.HexColor(TEXT))
 
-    def esc(t):
-        return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+    def cell(text):
+        return Paragraph(_esc(text), s_cell)
 
-    doc = SimpleDocTemplate(out_path, pagesize=A4,
-                            leftMargin=2*cm, rightMargin=2*cm,
-                            topMargin=2*cm, bottomMargin=2*cm,
-                            title=f"Forensic Report {meta['id']}")
+    doc = SimpleDocTemplate(
+        out_path, pagesize=A4,
+        leftMargin=2.2 * cm, rightMargin=2.2 * cm,
+        topMargin=2 * cm, bottomMargin=2 * cm,
+        title=f"Forensic Report {meta.get('id','')}",
+        author=str(meta.get("examiner", "")))
     story = []
 
-    # ── cover ──────────────────────────────────────────────────────────────────
-    cover = Table([[Paragraph("FORENSIC INVESTIGATION REPORT", s_cover)],
-                   [Paragraph(esc(meta["title"]), s_coversub)]],
-                  colWidths=[17*cm])
-    cover.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1E2A52")),
-        ("TOPPADDING", (0, 0), (-1, 0), 22),
-        ("BOTTOMPADDING", (0, -1), (-1, -1), 18),
-        ("LEFTPADDING", (0, 0), (-1, -1), 14),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
-    ]))
-    story.append(cover)
-    story.append(Spacer(1, 0.4*cm))
+    # ── letterhead ────────────────────────────────────────────────────────────
+    story.append(Paragraph(
+        f"{_esc(meta.get('id','—'))} &middot; {_esc(meta.get('agency','—'))} "
+        f"&middot; CONFIDENTIAL", s_letter))
+    story.append(Paragraph(_esc(rep.get("title", "Report of Digital Forensic "
+                                                "Examination")), s_title))
+    story.append(Paragraph(_esc(rep.get("byline", "")), s_byline))
+    story.append(HRFlowable(width="100%", thickness=1.4,
+                            color=colors.HexColor(TEXT), spaceAfter=2))
 
-    risk = meta.get("riskScore", 0)
-    risk_label = meta.get("riskLabel", "—")
-    info = Table([
-        ["Case number", meta["id"], "Risk score", f"{risk}/100 ({risk_label})"],
-        ["Examiner", f"{meta['examiner']} ({meta['examinerId']})", "Opened", meta["opened"]],
-        ["Agency", meta.get("agency", "—"), "Report date",
-         datetime.datetime.now().strftime("%Y-%m-%d %H:%M")],
-    ], colWidths=[3*cm, 5.5*cm, 3*cm, 5.5*cm])
-    info.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#555577")),
-        ("TEXTCOLOR", (2, 0), (2, -1), colors.HexColor("#555577")),
-        ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"),
-        ("FONTNAME", (3, 0), (3, -1), "Helvetica-Bold"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("LINEBELOW", (0, 0), (-1, -2), 0.3, colors.HexColor("#DDDDE5")),
-    ]))
-    story.append(info)
-    story.append(Spacer(1, 0.4*cm))
+    # ── 1. executive summary ──────────────────────────────────────────────────
+    story.append(Paragraph("1. Executive Summary", s_h2))
+    story.append(Paragraph(_esc(rep.get("summary", "")), s_body))
 
-    # ── summary stats ──────────────────────────────────────────────────────────
-    verified = sum(1 for e in evidence if e.get("verified"))
-    stat = Table([[
-        Paragraph(f"<b>{len(evidence)}</b><br/>Artifacts", _statstyle(st, colors)),
-        Paragraph(f"<b>{verified}</b><br/>Verified", _statstyle(st, colors)),
-        Paragraph(f"<b>{sev_counts[4]+sev_counts[3]}</b><br/>Critical/High", _statstyle(st, colors)),
-        Paragraph(f"<b>{len(findings)}</b><br/>Findings", _statstyle(st, colors)),
-        Paragraph(f"<b>{len(events)}</b><br/>Events", _statstyle(st, colors)),
-    ]], colWidths=[3.4*cm]*5)
-    stat.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, 0), colors.HexColor(SEV_HEX[4])),
-        ("BACKGROUND", (1, 0), (1, 0), colors.HexColor("#1E8449")),
-        ("BACKGROUND", (2, 0), (2, 0), colors.HexColor(SEV_HEX[3])),
-        ("BACKGROUND", (3, 0), (3, 0), colors.HexColor(ACCENT)),
-        ("BACKGROUND", (4, 0), (4, 0), colors.HexColor("#555577")),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
-    story.append(stat)
-    story.append(Spacer(1, 0.5*cm))
+    # ── 2. findings ───────────────────────────────────────────────────────────
+    story.append(Paragraph(f"2. Findings ({len(findings)} included)", s_h2))
+    if not findings:
+        story.append(Paragraph(
+            "No findings were included in this report.", s_body))
+    for i, f in enumerate(findings, start=1):
+        sev = _sev(f)
+        story.append(Paragraph(
+            f"{i}. {_esc(f.get('title',''))} "
+            f'<font size="7" color="{SEV_HEX.get(sev, TEXT2)}">'
+            f'<b>{_esc(sev)}</b></font>', s_fname))
+        story.append(Paragraph(
+            _esc(f.get("what") or f.get("reason") or ""), s_body))
+        bits = [f.get("id", "")]
+        if f.get("mitre") and f.get("mitre") != "—":
+            name = f.get("mitreName")
+            bits.append(f"ATT&amp;CK {_esc(f['mitre'])}"
+                        + (f" ({_esc(name)})" if name else ""))
+        if f.get("conf"):
+            bits.append(f"Confidence {_esc(f['conf'])}")
+        refs = f.get("ev") or f.get("evidence") or []
+        if refs:
+            bits.append("Evidence " + _esc(", ".join(refs)))
+        story.append(Paragraph(" &middot; ".join(bits), s_src))
 
-    # ── chain of custody ───────────────────────────────────────────────────────
+    # ── 3. examiner remarks ───────────────────────────────────────────────────
+    if notes:
+        story.append(Paragraph("3. Examiner Remarks", s_h2))
+        for para in notes.split("\n"):
+            if para.strip():
+                story.append(Paragraph(_esc(para), s_body))
+
+    # ── chain of custody ──────────────────────────────────────────────────────
     story.append(Paragraph("Chain of Custody", s_h2))
-    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor(ACCENT)))
+    story.append(Paragraph(
+        "Every artifact below was fingerprinted with SHA-256 on intake and "
+        "opened read-only. No evidence file was modified or executed at any "
+        "point during the examination.", s_small))
+    story.append(Spacer(1, 0.25 * cm))
     coc = [["ID", "Artifact", "Type", "Size", "SHA-256 (intake)", "Integrity"]]
     for e in evidence:
-        h = e.get("sha256", "")
-        coc.append([e["id"], esc(e["name"]), esc(e.get("type", "")), e.get("size", ""),
-                    (h[:10] + "…" + h[-8:]) if h else "—",
-                    "VERIFIED" if e.get("verified") else "PENDING"])
-    coc_t = Table(coc, colWidths=[1.2*cm, 4*cm, 3.6*cm, 1.8*cm, 4.4*cm, 2*cm], repeatRows=1)
-    coc_t.setStyle(_table_style(colors))
-    story.append(coc_t)
-    story.append(Spacer(1, 0.3*cm))
+        h = e.get("sha") or e.get("sha256", "")
+        coc.append([
+            e.get("id", ""), cell(e.get("name", "")),
+            cell(e.get("kindLabel") or e.get("type", "")), e.get("size", ""),
+            (h[:12] + "…" + h[-6:]) if h else "—",
+            "VERIFIED" if e.get("verified") else "PENDING",
+        ])
+    t = Table(coc, colWidths=[1.2 * cm, 3.6 * cm, 3.4 * cm, 1.8 * cm, 4.4 * cm,
+                              2.2 * cm], repeatRows=1)
+    t.setStyle(_table_style(colors))
+    story.append(t)
 
-    # ── narrative ──────────────────────────────────────────────────────────────
-    if narrative.get("sections"):
-        story.append(Paragraph("Investigative Narrative", s_h2))
-        story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor(ACCENT)))
-        story.append(Paragraph(f"Generated by {esc(narrative.get('engine','—'))}", s_small))
-        story.append(Spacer(1, 0.15*cm))
-        for sec in narrative["sections"]:
-            h, conf, text = sec
-            story.append(Paragraph(esc(h), s_h3))
-            story.append(Paragraph(esc(text), s_body))
-
-    # ── findings ───────────────────────────────────────────────────────────────
-    story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph("Findings", s_h2))
-    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor(ACCENT)))
-    if not findings:
-        story.append(Paragraph("No findings were identified.", s_body))
-    for f in sorted(findings, key=lambda x: -x.get("sev", 1)):
-        sev = f.get("sev", 1)
-        pill = Table([[Paragraph(
-            f"<b>{f['id']} · {SEV_LABEL[sev].upper()}</b> &nbsp; {esc(f.get('title',''))}",
-            st("Pill", fontSize=10, textColor=colors.white))]], colWidths=[17*cm])
-        pill.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(SEV_HEX[sev])),
-            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        story.append(Spacer(1, 0.15*cm))
-        story.append(pill)
-        meta_line = []
-        if f.get("mitre"):
-            meta_line.append(f"<b>MITRE ATT&amp;CK:</b> {esc(f['mitre'])} {esc(f.get('mitreName',''))}")
-        meta_line.append(f"<b>Confidence:</b> {esc(f.get('conf','—'))}")
-        meta_line.append(f"<b>Time:</b> {esc(f.get('ts','—'))}")
-        if f.get("evidence"):
-            meta_line.append(f"<b>Evidence:</b> {esc(', '.join(f['evidence']))}")
-        story.append(Paragraph(" &nbsp;|&nbsp; ".join(meta_line), s_small))
-        if f.get("reason"):
-            story.append(Paragraph(esc(f["reason"]), s_body))
-        if f.get("rule"):
-            story.append(Paragraph(f"<i>{esc(f['rule'])}</i>", s_small))
-
+    # ── appendices ────────────────────────────────────────────────────────────
     story.append(PageBreak())
-
-    # ── timeline appendix ──────────────────────────────────────────────────────
     story.append(Paragraph("Appendix A — Event Timeline", s_h2))
-    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor(ACCENT)))
-    # report on the events that carry meaning; pure NTFS system-noise is summarised
-    # rather than listed row-by-row so the appendix stays readable.
-    sig = [e for e in events if _ev(e, "relevance") != "noise"]
-    noise_n = len(events) - len(sig)
-    if noise_n:
+
+    # System noise is summarised, not listed: pages of $MFT records would bury
+    # the events that matter, which is the problem this redesign set out to fix.
+    sig = [e for e in events if _get(e, "rel", _get(e, "relevance", "")) != "noise"]
+    hidden = len(events) - len(sig)
+    if hidden:
         story.append(Paragraph(
-            f"{noise_n} standard NTFS system-metadata events (present on every "
-            f"Windows volume) are omitted from this listing as non-evidential. "
-            f"{len(sig)} interpreted events are shown below.", s_small))
-        story.append(Spacer(1, 0.15*cm))
-    tl = [["Timestamp", "Source", "Event", "What it means", "Sev"]]
-    for ev in sig:
-        means = _ev(ev, "meaning") or _ev(ev, "note") or _ev(ev, "description")
-        tl.append([_ev(ev, "ts"), _ev(ev, "src"),
-                   esc(str(_ev(ev, "label"))[:60]),
-                   esc(str(means)[:70]),
-                   SEV_LABEL.get(_ev(ev, "sev"), "")])
+            f"{hidden} routine NTFS system-metadata records ($MFT, $Bitmap and "
+            f"similar, present on every Windows volume) are omitted as "
+            f"non-evidential. The {len(sig)} interpreted events below are those "
+            f"bearing on the case.", s_small))
+        story.append(Spacer(1, 0.25 * cm))
+
+    tl = [["Timestamp", "Source", "What happened", "What it means"]]
+    for e in sig:
+        tl.append([
+            cell(_get(e, "ts")), cell(_get(e, "src")),
+            cell(str(_get(e, "label"))),
+            cell(str(_get(e, "mean") or _get(e, "meaning")
+                     or _get(e, "description"))),
+        ])
     if len(tl) == 1:
-        tl.append(["—", "—", "No non-system events were recorded.", "", ""])
-    tl_t = Table(tl, colWidths=[3.1*cm, 1.8*cm, 5.2*cm, 5.3*cm, 1.6*cm], repeatRows=1)
-    tl_t.setStyle(_table_style(colors))
-    story.append(tl_t)
-    story.append(Spacer(1, 0.3*cm))
+        tl.append(["—", "—", cell("No interpreted events were recorded."), ""])
+    t = Table(tl, colWidths=[2.9 * cm, 1.8 * cm, 5.6 * cm, 6.3 * cm], repeatRows=1)
+    t.setStyle(_table_style(colors))
+    story.append(t)
 
-    # ── audit appendix ─────────────────────────────────────────────────────────
+    story.append(Spacer(1, 0.4 * cm))
     story.append(Paragraph("Appendix B — Audit Trail", s_h2))
-    story.append(HRFlowable(width="100%", thickness=0.6, color=colors.HexColor(ACCENT)))
-    au = [["Timestamp", "Actor", "Action", "Detail"]]
-    for a in audit:
-        ts, who, act, detail = a
-        au.append([ts, who, act, esc(detail[:80])])
-    au_t = Table(au, colWidths=[3.4*cm, 2.4*cm, 3.6*cm, 7.6*cm], repeatRows=1)
-    au_t.setStyle(_table_style(colors))
-    story.append(au_t)
+    story.append(Paragraph(
+        "This log is append-only. It records every action taken on the case.",
+        s_small))
+    story.append(Spacer(1, 0.25 * cm))
+    au = [["#", "Timestamp", "Actor", "Action", "Detail"]]
+    for i, a in enumerate(audit, start=1):
+        if isinstance(a, dict):
+            ts, who, act, detail = a["ts"], a["who"], a["act"], a["detail"]
+        else:
+            ts, who, act, detail = a
+        au.append([f"{i:03d}", cell(ts), cell(who), cell(act), cell(str(detail))])
+    t = Table(au, colWidths=[1 * cm, 3 * cm, 2.2 * cm, 3.6 * cm, 6.8 * cm],
+              repeatRows=1)
+    t.setStyle(_table_style(colors))
+    story.append(t)
 
-    # footer with page numbers
-    def _footer(canvas, doc_):
+    story.append(Spacer(1, 0.5 * cm))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+                            color=colors.HexColor(LINE), spaceAfter=6))
+    for line in str(rep.get("footer", "")).split("\n"):
+        story.append(Paragraph(_esc(line), s_foot))
+
+    def _page(canvas, doc_):
         canvas.saveState()
-        canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.HexColor("#999999"))
-        canvas.drawString(2*cm, 1.2*cm,
-                          f"Forensic AI Agent · Case {meta['id']} · CONFIDENTIAL")
-        canvas.drawRightString(19*cm, 1.2*cm, f"Page {doc_.page}")
+        canvas.setFont("Courier", 6.5)
+        canvas.setFillColor(colors.HexColor(TEXT3))
+        canvas.drawString(2.2 * cm, 1.2 * cm,
+                          f"Forensic AI Agent · Case {meta.get('id','')} · "
+                          f"CONFIDENTIAL")
+        canvas.drawRightString(A4[0] - 2.2 * cm, 1.2 * cm, f"Page {doc_.page}")
         canvas.restoreState()
 
-    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    doc.build(story, onFirstPage=_page, onLaterPages=_page)
     return out_path
-
-
-def _statstyle(st, colors):
-    from reportlab.lib.enums import TA_CENTER
-    return st("Stat", fontSize=9, textColor=colors.white, alignment=TA_CENTER)
 
 
 def _table_style(colors):
     from reportlab.platypus import TableStyle
     return TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2C3E70")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-         [colors.white, colors.HexColor("#F2F4F9")]),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDE5")),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F8F8FA")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(TEXT3)),
+        ("FONTNAME", (0, 0), (-1, 0), "Courier-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("TEXTCOLOR", (0, 1), (-1, -1), colors.HexColor(TEXT)),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, colors.HexColor(LINE)),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.25, colors.HexColor("#EFEFF3")),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ])

@@ -73,9 +73,24 @@ Download from: https://www.sleuthkit.org/sleuthkit/download.php
 ```
 PySide6>=6.6.0
 pyinstaller>=6.0
+reportlab>=4.0
 ```
 
+`reportlab` builds the exported PDF report. Without it the app still runs and
+analyses evidence; only the PDF export is unavailable.
+
 No additional AI/ML dependencies — Ollama runs as a separate system process.
+
+### Fonts
+
+The interface ships its own fonts in `assets/fonts/` and loads them at startup,
+so it looks the same on a machine that has never seen them:
+
+- **Lexend** (UI) and **IBM Plex Mono** (hashes, timestamps, paths) — both SIL
+  Open Font License, included with their licence files.
+
+If the files are missing the app falls back to the system UI and monospace faces
+and prints a note at startup rather than failing.
 
 ---
 
