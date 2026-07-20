@@ -2,10 +2,9 @@
 max_sentences: 6
 max_chars: 800
 min_chars: 120
-forbid: in conclusion, to conclude, wrapping up
+forbid: in conclusion, to conclude, wrapping up, —, "**"
 ---
 FORMAT: Report conclusion narrative.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 A few sentences giving the examiner's overall read: what the evidence
 collectively suggests, how the findings relate, and the confidence in that

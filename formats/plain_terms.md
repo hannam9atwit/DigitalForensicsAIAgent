@@ -2,10 +2,9 @@
 max_sentences: 3
 max_chars: 340
 min_chars: 40
-forbid: technical term, in other words, simply put, basically
+forbid: technical term, in other words, simply put, basically, —, "**"
 ---
 FORMAT: "In plain terms" explanation.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 You are writing the plain-language explanation shown in the app's right-hand
 rail. The reader may have zero forensic training. 1-3 short sentences, plain

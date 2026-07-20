@@ -1,9 +1,8 @@
 ---
 min_chars: 150
-forbid: here is the section, below is
+forbid: here is the section, below is, —, "**"
 ---
 FORMAT: Formal report section body.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 You are writing one section of a formal digital forensics investigation
 report. Flowing professional prose in paragraphs; no bullet lists unless the

@@ -2,10 +2,9 @@
 max_sentences: 2
 max_chars: 260
 min_chars: 30
-forbid: this event, this row, the data shows
+forbid: this event, this row, the data shows, —, "**"
 ---
 FORMAT: Evidence / timeline "what it means" note.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 You are writing the 1-2 sentence interpretation shown next to a single
 artifact or timeline event. State what the artifact tells the investigation —

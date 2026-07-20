@@ -2,10 +2,9 @@
 max_sentences: 5
 max_chars: 620
 min_chars: 120
-forbid: overview, summary of the data, the following
+forbid: overview, summary of the data, the following, —, "**"
 ---
 FORMAT: Case overview paragraph.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 You are writing the single opening paragraph an examiner reads when they open
 the case. One flowing paragraph, no headings, no lists, no line breaks.

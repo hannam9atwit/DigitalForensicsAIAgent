@@ -2,10 +2,9 @@
 max_sentences: 5
 max_chars: 700
 min_chars: 100
-forbid: this finding, as mentioned, technical term
+forbid: this finding, as mentioned, technical term, —, "**"
 ---
 FORMAT: Per-finding plain-language explanation ("What was found").
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 A short paragraph a non-expert understands: what was found, in normal words,
 and why it matters in this case. The technical detail lives in a separate

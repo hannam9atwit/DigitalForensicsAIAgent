@@ -2,10 +2,9 @@
 max_sentences: 6
 max_chars: 900
 min_chars: 150
-forbid: overview, the following, in summary
+forbid: overview, the following, in summary, —, "**"
 ---
 FORMAT: Report executive summary paragraph.
-STATUS: DRAFT — replace this file with the finalized format when approved.
 
 One flowing paragraph for the report's Section 1, read by non-experts first.
 State: what was examined (artifact and event counts), what was found (finding
