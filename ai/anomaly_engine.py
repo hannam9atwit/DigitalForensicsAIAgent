@@ -8,8 +8,6 @@ class AnomalyEngine:
     """
 
     def run(self, disk_data, browser_data, unified_timeline):
-        print("[DEBUG] AnomalyEngine disk_data type:", type(disk_data))
-        print("[DEBUG] AnomalyEngine disk events sample:", disk_data.get("events", [])[:3])
 
         anomalies = []
 

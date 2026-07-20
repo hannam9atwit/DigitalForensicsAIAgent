@@ -122,9 +122,10 @@ ROUTES = {
 }
 
 
-def run_analysis(evidence_list, log=print):
+def run_analysis(evidence_list, log=print, ai_config=None):
     """
     evidence_list: list of dicts each with "_path" and "kind".
+    ai_config: the user's engine choice from Settings (provider/model/api_key).
     Returns {events, findings, anomalies, narrative, pipeline}.
     """
     import time
@@ -201,7 +202,7 @@ def run_analysis(evidence_list, log=print):
     narrative = ""
     try:
         from ai.narrative_engine import NarrativeEngine
-        narrative = NarrativeEngine().generate({
+        narrative = NarrativeEngine(ai_config).generate({
             "findings": findings, "anomalies": anomalies,
             "timeline": {"events": all_events}, "browser": {},
             "summary": {"finding_count": len(findings), "anomaly_count": len(anomalies)},

@@ -56,5 +56,5 @@ class CookiesParser:
     def _chrome_time_to_unix(self, chrome_time):
         try:
             return (chrome_time / 1_000_000) - 11644473600
-        except:
+        except (ValueError, TypeError, KeyError, IndexError):
             return None

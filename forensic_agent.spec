@@ -23,11 +23,12 @@ sleuthkit_binaries = [
 ]
 
 a = Analysis(
-    ["gui_main.py"],
+    ["gui_main_native.py"],
     pathex=["."],
     binaries=sleuthkit_binaries,
     datas=[
         ("assets", "assets"),
+        ("formats", "formats"),
     ],
     hiddenimports=[
         *pyside6_hidden,
@@ -38,11 +39,14 @@ a = Analysis(
         "ai.narrative_engine",
         "ai.refinement_engine",
         "ai.report_generator",
+        "ai.format_library",
+        "ai.surface_engine",
         "core",
         "core.artifact_router",
         "core.output_normalizer",
         "core.partition_detector",
         "core.tool_runner",
+        "core.ollama_runtime",
         "modules.disk.mft_parser",
         "modules.disk.deleted_recovery",
         "modules.disk.timeline_builder",
@@ -51,8 +55,26 @@ a = Analysis(
         "modules.browser.cookies_parser",
         "modules.timeline.correlation_engine",
         "pipeline.run_pipeline",
-        "gui.main_window",
-        "gui.setup_wizard",
+        "gui_v2",
+        "gui_v2.main_window",
+        "gui_v2.setup_wizard",
+        "gui_v2.ai_worker",
+        "gui_v2.app_settings",
+        "gui_v2.case_store",
+        "gui_v2.case_model",
+        "gui_v2.content",
+        "gui_v2.data_adapter",
+        "gui_v2.interpreter",
+        "gui_v2.pipeline_router",
+        "gui_v2.report_pdf",
+        "gui_v2.evidence_export",
+        "gui_v2.case_history",
+        "gui_v2.intake_dialog",
+        "gui_v2.theme",
+        "gui_v2.widgets",
+        "gui_v2.sidebar",
+        "gui_v2.rail",
+        "gui_v2.screens",
         "sqlite3",
         "csv",
         "json",
@@ -96,8 +118,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,   # keep True so errors are visible; set False once confirmed working
-    icon=None,      # set to "assets/icon.ico" if you have a .ico file
+    console=False,
+    icon="assets/app.ico",
 )
 
 coll = COLLECT(

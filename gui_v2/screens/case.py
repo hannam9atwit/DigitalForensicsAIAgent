@@ -60,10 +60,41 @@ class CaseScreen(Screen):
         lay.addLayout(row2)
         lay.addStretch(1)
 
+    def on_show(self, arg=None):
+        super().on_show(arg)
+        self._request_ai_overview()
+
+    def _request_ai_overview(self):
+        """Upgrade the overview paragraph with a model-written one.
+
+        The curated/deterministic paragraph shows instantly; the generated
+        paragraph replaces it when ready and is cached on the case dict so it
+        is written once per case, not once per visit.
+        """
+        if self.case.get("paragraphAI") or not self.ai_config:
+            return
+        if not self.case.get("findings"):
+            return
+
+        from ..ai_worker import SurfaceJob
+        self._ai_job = SurfaceJob(self.ai_config)
+        self._ai_job.result_ready.connect(self._ai_overview_ready)
+        self._ai_job.run("overview", token="overview", fallback="",
+                         case=self.case)
+
+    def _ai_overview_ready(self, _token, text):
+        if not text or self._para_label is None:
+            return
+        self.case["paragraphAI"] = text
+        escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
+                   .replace(">", "&gt;"))
+        self._para_label.setText(escaped)
+
     def _paragraph_card(self):
         card = w.Card(pad=17, spacing=8)
         card.head("THE CASE IN ONE PARAGRAPH")
 
+        self._para_label = None
         para = self.case.get("paragraph")
         if para:
             # Rich text so the design's emphasis (key terms at weight 500,
@@ -79,10 +110,12 @@ class CaseScreen(Screen):
                              f'font-size:12px;">{esc}</span>')
                 else:
                     html += esc
-            card.add(w.body(html, size=13, lh=1.65, rich=True))
+            self._para_label = w.body(html, size=13, lh=1.65, rich=True)
+            card.add(self._para_label)
         else:
-            card.add(w.body(self._fallback_paragraph(), size=13, lh=1.65,
-                            color=P["text2"]))
+            self._para_label = w.body(self._fallback_paragraph(), size=13,
+                                      lh=1.65, color=P["text2"])
+            card.add(self._para_label)
 
         card.add(w.spacer(h=4))
         card.add(w.primary_button(

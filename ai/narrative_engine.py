@@ -11,8 +11,8 @@ class NarrativeEngine:
     When no key is present, the deterministic fallback is used instead.
     """
 
-    def __init__(self):
-        self.refiner = RefinementEngine()
+    def __init__(self, ai_config: dict | None = None):
+        self.refiner = RefinementEngine(ai_config)
 
     def generate(self, analysis: dict) -> str:
         findings  = analysis.get("findings", [])

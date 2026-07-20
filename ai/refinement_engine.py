@@ -4,10 +4,15 @@ ai/refinement_engine.py
 LLM integration layer for the forensic narrative engine.
 
 Generates the forensic report one section at a time using few-shot prompting.
-Supports two backends in priority order:
-  1. Ollama (local, llama3.2:3b) — runs fully offline after first setup
-  2. Anthropic Claude API — used when ANTHROPIC_API_KEY is set
+Backends in priority order:
+  1. Ollama (local) — runs fully offline after first setup
+  2. Anthropic Claude API — used when the user sets a key in Settings
   3. Deterministic fallback — used when no LLM is available
+
+The section format (voice, structure, few-shot example) is owned by
+formats/report_section.md via ai.format_library, so the report's shape can be
+changed without touching this code. The constants below remain as the
+fallback when the spec file is absent.
 """
 
 import os
@@ -15,6 +20,9 @@ import json
 import datetime
 import urllib.request
 from collections import Counter
+
+from ai import format_library
+from core import ollama_runtime
 
 
 # Shared persona prepended to every LLM call
@@ -44,14 +52,20 @@ Now write the section below. Begin writing the report immediately after "REPORT 
 
 class RefinementEngine:
 
-    OLLAMA_URL   = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "llama3.2:3b"
+    OLLAMA_URL   = f"{ollama_runtime.OLLAMA_HOST}/api/generate"
 
     ANTHROPIC_URL   = "https://api.anthropic.com/v1/messages"
     ANTHROPIC_MODEL = "claude-sonnet-4-5"
 
-    def __init__(self):
-        self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    def __init__(self, ai_config: dict | None = None):
+        """ai_config: {"provider", "model", "api_key"} from Settings.
+        Falls back to Ollama defaults + the ANTHROPIC_API_KEY env var so the
+        headless pipeline keeps working without a GUI."""
+        config = ai_config or {}
+        self.provider = config.get("provider", "ollama")
+        self.OLLAMA_MODEL = config.get("model") or ollama_runtime.DEFAULT_MODEL
+        self.anthropic_api_key = (config.get("api_key")
+                                  or os.environ.get("ANTHROPIC_API_KEY", ""))
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -59,8 +73,8 @@ class RefinementEngine:
         if analysis is None:
             return self._deterministic_format(raw_narrative)
 
-        use_ollama    = self._ollama_available()
-        use_anthropic = bool(self.anthropic_api_key)
+        use_ollama    = self.provider != "anthropic" and self._ollama_available()
+        use_anthropic = (not use_ollama) and bool(self.anthropic_api_key)
 
         if not use_ollama and not use_anthropic:
             print("[~] No LLM available — using deterministic fallback")
@@ -105,8 +119,15 @@ class RefinementEngine:
 
     # ── LLM callers ───────────────────────────────────────────────────────────
 
+    def _section_format_text(self) -> str:
+        """The report-section format from formats/report_section.md, or the
+        built-in few-shot text when the spec file is missing."""
+        spec = format_library.load(format_library.SURFACE_REPORT_SECTION)
+        return spec.prompt_text if spec else _FEW_SHOT
+
     def _call_ollama(self, prompt: str) -> str:
-        full_prompt = f"{_PERSONA}\n\n{_FEW_SHOT}\n\n{prompt}\n\nREPORT TEXT:"
+        full_prompt = (f"{_PERSONA}\n\n{self._section_format_text()}\n\n"
+                       f"{prompt}\n\nREPORT TEXT:")
 
         payload = json.dumps({
             "model":  self.OLLAMA_MODEL,
@@ -132,7 +153,7 @@ class RefinementEngine:
         return text
 
     def _call_anthropic(self, prompt: str) -> str:
-        full_prompt = f"{_FEW_SHOT}\n\n{prompt}\n\nREPORT TEXT:"
+        full_prompt = f"{self._section_format_text()}\n\n{prompt}\n\nREPORT TEXT:"
 
         payload = json.dumps({
             "model":      self.ANTHROPIC_MODEL,
@@ -158,25 +179,20 @@ class RefinementEngine:
         return "\n".join(texts)
 
     def _ollama_available(self) -> bool:
-        try:
-            req = urllib.request.Request(
-                "http://localhost:11434/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                body = json.loads(resp.read().decode())
-            models = [m.get("name", "") for m in body.get("models", [])]
-            print("[DEBUG] Ollama models found:", models)
-            for preferred in ["llama3.2", "llama3.1", "llama"]:
-                if any(preferred in m for m in models):
-                    if any("llama3.2" in m for m in models):
-                        self.OLLAMA_MODEL = "llama3.2:3b"
-                    elif any("llama3.1" in m for m in models):
-                        self.OLLAMA_MODEL = "llama3.1:8b"
-                    print(f"[*] Using Ollama model: {self.OLLAMA_MODEL}")
-                    return True
+        """True when the server runs and can serve the configured model.
+        If the exact model is absent but another tag of its base is present,
+        use what's there rather than failing the whole report."""
+        if not ollama_runtime.server_running():
             return False
-        except Exception as e:
-            print("[DEBUG] Ollama check failed:", e)
-            return False
+        if ollama_runtime.model_available(self.OLLAMA_MODEL):
+            return True
+
+        models = ollama_runtime.installed_models()
+        if models:
+            self.OLLAMA_MODEL = models[0]
+            print(f"[~] Configured model unavailable — using {self.OLLAMA_MODEL}")
+            return True
+        return False
 
     # ── Preamble stripper ─────────────────────────────────────────────────────
 

@@ -1,196 +1,98 @@
 # Forensic AI Agent
 
-[![Download Release](https://img.shields.io/badge/Download-Release-blue?logo=github)](https://github.com/hannam9atwit/DigitalForensicsAIAgent/releases/latest)
+> **Note:** the product name is still being finalized. To rebrand, change
+> `AppName` in `ForensicAIAgent_Setup.iss` and `setApplicationName` in
+> `gui_main_native.py`.
 
-A cross-platform digital forensics investigation tool powered by a local LLM (Llama 3.2 via Ollama), with optional Anthropic Claude API support.
-
----
-
-## Quick Download & Setup
-
-1. Click the blue **Download Release** button above.
-2. Download the latest Windows package from GitHub Releases.
-3. Extract the ZIP file and open `ForensicAIAgent.exe`.
-4. On first launch, follow the setup wizard to install Ollama and download the local model (~2 GB).
-5. After setup completes, the app runs fully offline and is ready for investigations.
-
-> The setup wizard only requires internet for the first install and model download. After that, the app works locally.
+A digital forensics investigation console powered by a local LLM (Ollama),
+with optional Anthropic Claude API support. Evidence never leaves the machine.
 
 ---
 
-## For End Users (Running the App)
+## Install (Windows)
 
-### Windows
-1. Download and unzip `ForensicAIAgent-windows.zip`
-2. Run `ForensicAIAgent.exe`
-3. On first launch, a setup wizard will install Ollama and download the AI model (~2 GB). You only need internet for this step.
-4. After setup, the app works fully offline.
+Two installers, same app:
 
-### Linux
-1. Download `ForensicAIAgent.AppImage`
-2. Make it executable and run it:
-   ```bash
-   chmod +x ForensicAIAgent.AppImage
-   ./ForensicAIAgent.AppImage
-   ```
-3. The setup wizard handles Ollama installation on first launch.
+| Installer | Size | Best for |
+|---|---|---|
+| **Setup-Full.exe** | ~2.4 GB | Fully offline install — Ollama and the AI model are bundled. Works with no internet, ever. |
+| **Setup-Lite.exe** | ~500 MB | Smaller download — the AI model (~2 GB) downloads automatically on first launch. |
 
-> **Skip AI setup?** You can click "Skip" in the wizard. The app will still analyse artifacts and produce reports — it just uses rule-based narrative text instead of an LLM.
+1. Run the installer. No admin rights needed — it installs per-user.
+2. Keep **"Install Ollama and set up local AI"** checked (recommended).
+3. Launch the app. Full installs are ready immediately; Lite installs finish
+   the one-time model download on first run.
+
+Every install starts completely fresh: no cases, no history, no prior data.
+A **Demo Case** is available from `Case ▸ Open Demo Case` to explore the
+interface — it is clearly-labeled fixture data, never real evidence.
+
+If local AI setup was skipped, the app runs in rule-based mode; enable AI
+any time from **Settings ▸ Run local AI setup**.
+
+## AI engines
+
+The default engine is **Ollama running locally** — it writes the case
+overview, the "in plain terms" explanations, the per-artifact "what it means"
+notes, and the full investigation report, entirely on your machine. In
+Settings you can switch the engine to the Anthropic API (bring your own key —
+held in memory only, never written to disk) or to rule-based text with no AI.
+
+Output formats live in `formats/` — one spec file per surface (report
+sections, case overview, plain terms, what it means). The AI is validated
+against these specs at generation time; updating a spec file changes the AI's
+output format with no code changes.
 
 ---
 
-## For Developers (Building from Source)
+## Building from source
 
 ### Prerequisites
+- Python 3.11+, `pip install -r requirements.txt`
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) — installers
+- [Ollama](https://ollama.com) on the build machine — Full installer only
+- SleuthKit Windows binaries in `bin/sleuthkit/`
+  ([download](https://www.sleuthkit.org/sleuthkit/download.php))
 
-- Python 3.11+
-- Git
-- The SleuthKit Windows binaries in `bin/sleuthkit/` (not included in repo — see below)
-
+### Run from source
 ```bash
-git clone https://github.com/hannam9atwit/DigitalForensicsAIAgent.git
-cd DigitalForensicsAIAgent
 pip install -r requirements.txt
-python gui_main.py
+python gui_main_native.py
 ```
 
-### SleuthKit Binaries
-
-Place the SleuthKit `.exe` files (Windows) or binaries (Linux) into:
-```
-bin/
-└── sleuthkit/
-    ├── fls.exe
-    ├── mmls.exe
-    ├── icat.exe
-    └── ...
-```
-
-Download from: https://www.sleuthkit.org/sleuthkit/download.php
-
-### requirements.txt
-
-```
-PySide6>=6.6.0
-pyinstaller>=6.0
-reportlab>=4.0
-```
-
-`reportlab` builds the exported PDF report. Without it the app still runs and
-analyses evidence; only the PDF export is unavailable.
-
-No additional AI/ML dependencies — Ollama runs as a separate system process.
-
-### Fonts
-
-The interface ships its own fonts in `assets/fonts/` and loads them at startup,
-so it looks the same on a machine that has never seen them:
-
-- **Lexend** (UI) and **IBM Plex Mono** (hashes, timestamps, paths) — both SIL
-  Open Font License, included with their licence files.
-
-If the files are missing the app falls back to the system UI and monospace faces
-and prints a note at startup rather than failing.
-
----
-
-## Building Distributable Packages
-
-### Windows (run on a Windows machine)
-
+### Build the installers
 ```bat
+ollama pull llama3.2:3b     &:: once, for the Full variant
 build_windows.bat
 ```
+The script runs PyInstaller, downloads `OllamaSetup.exe`, stages the model
+payload (`tools/prepare_model_payload.py`), and compiles both installers into
+`dist/`.
 
-Output: `dist\ForensicAIAgent\` — zip this folder for distribution.
-
-### Linux (run on Ubuntu 22.04+)
-
-```bash
-chmod +x build_linux.sh
-./build_linux.sh
-```
-
-Output:
-- `dist/ForensicAIAgent/` — portable folder
-- `dist/ForensicAIAgent.AppImage` — single-file distributable
+### Linux
+`build_linux.sh` produces the AppImage; the in-app setup wizard handles
+Ollama on first launch.
 
 ---
 
-## Reset / Uninstall for Testing
+## Distributing
 
-If you already installed the app and want to remove it before testing again:
+- **GitHub Releases:** upload `Setup-Lite.exe`. (The Full installer exceeds
+  GitHub's 2 GiB per-file release limit — don't upload it there.)
+- **Website:** host `Setup-Full.exe` as the primary download and link the
+  Lite installer as the "smaller download" alternative. Serve it from object
+  storage or a CDN rather than shared hosting — a 2.4 GB file will saturate a
+  small web server's bandwidth quickly.
 
-- Delete the extracted application folder.
-- If you installed Ollama, uninstall it from **Windows Settings → Apps**.
-- Remove the downloaded model with:
-
-```powershell
-ollama rm llama3.2:3b
-```
-
-Or run the included helper script from PowerShell:
-
-```powershell
-.\cleanup_test_installation.ps1
-```
-
----
-
-## AI Configuration
-
-### Default: Local LLM (Ollama)
-- Model: `llama3.2:3b` (~2 GB download)
-- Runs entirely offline after first setup
-- No API key required
-
-### Optional Upgrade: Anthropic Claude API
-If you have an Anthropic API key, go to **Tools → Settings** and enter it.
-Claude will be used instead of the local model when available, with Ollama as fallback.
-
-Priority order: **Ollama → Claude API → Rule-based fallback**
-
----
-
-## Project Structure
+## Project layout
 
 ```
-forensic-ai-agent/
-├── ai/
-│   ├── anomaly_engine.py       # Heuristic anomaly detection
-│   ├── narrative_engine.py     # Builds structured forensic narrative
-│   ├── reasoning_engine.py     # Orchestrates rule + anomaly engines
-│   ├── refinement_engine.py    # LLM integration (Ollama / Claude)
-│   ├── report_generator.py     # Markdown report output
-│   └── rule_engine.py          # Deterministic DFIR rules
-├── core/
-│   ├── artifact_router.py      # Detects artifact type
-│   ├── output_normalizer.py    # Normalises SleuthKit output
-│   ├── partition_detector.py   # NTFS offset detection via mmls
-│   └── tool_runner.py          # Runs bundled SleuthKit binaries
-├── modules/
-│   ├── browser/                # Chrome history / downloads / cookies
-│   ├── disk/                   # MFT parser, deleted recovery, timeline
-│   └── timeline/               # Unified timeline correlation
-├── gui/
-│   ├── main_window.py          # PySide6 main window
-│   └── setup_wizard.py         # First-run Ollama install wizard
-├── pipeline/
-│   └── run_pipeline.py         # End-to-end pipeline orchestration
-├── bin/sleuthkit/              # SleuthKit binaries (not in repo)
-├── assets/                     # Icons and splash screen
-├── gui_main.py                 # Application entry point
-├── forensic_agent.spec         # PyInstaller build spec
-├── build_windows.bat           # Windows build script
-└── build_linux.sh              # Linux build + AppImage script
+gui_main_native.py     entry point (first-run AI check → main window)
+gui_v2/                the application UI (screens, rail, theme, wizard)
+ai/                    narrative + surface engines, format library
+formats/               AI output format specs (edit these, not code)
+core/                  ollama_runtime, SleuthKit tool runners, parsers
+modules/, pipeline/    artifact parsers and the analysis pipeline
+tools/                 build tooling (model payload staging)
+ForensicAIAgent_Setup.iss   Windows installer (Full + Lite variants)
 ```
-
----
-
-## Roadmap
-
-- [ ] IOC (Indicator of Compromise) rule layer
-- [ ] Firefox / Edge browser support
-- [ ] SHA-256 hashing for chain of custody
-- [ ] Browser DB extraction from within disk images
-- [ ] Windows installer (Inno Setup) with optional AI toggle

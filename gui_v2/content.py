@@ -1,7 +1,7 @@
 """
 gui_v2/content.py
 
-The demo case (FA-2026-0142, "Suspected Data Exfiltration — Meridian Dynamics")
+The demo case (DEMO-001, "Demo Case — Suspected Data Exfiltration")
 in the shape the screens render.
 
 The copy here is lifted verbatim from the approved design prototype and is
@@ -22,13 +22,14 @@ Every finding answers the three questions the design is built around:
 # ── Case metadata ─────────────────────────────────────────────────────────────
 
 CASE_META = {
-    "id": "FA-2026-0142",
-    "title": "Suspected Data Exfiltration — Meridian Dynamics",
-    "examiner": "M. Hanna",
-    "examinerId": "EX-031",
-    "agency": "Meridian Dynamics IR",
+    "id": "DEMO-001",
+    "title": "Demo Case — Suspected Data Exfiltration",
+    "isDemo": True,
+    "examiner": "Demo Examiner",
+    "examinerId": "EX-000",
+    "agency": "Meridian Dynamics IR (fictitious)",
     "opened": "2026-06-05 09:18:02",
-    "custodian": "M. Hanna",
+    "custodian": "Demo Examiner",
     "riskScore": 87,
     "riskLabel": "HIGH",
     "riskCaption": "Driven by 2 critical findings on Jun 3.",
@@ -332,7 +333,7 @@ TL_SOURCES = ["All", "Disk", "Browser", "Downloads", "Registry", "EventLog", "US
 
 AUDIT = [
     {"ts": "Jun 5 09:18:02", "who": "M. Hanna", "act": "CASE_CREATED",
-     "detail": "Case FA-2026-0142 registered · intake form completed", "kind": "user"},
+     "detail": "Case DEMO-001 registered · intake form completed", "kind": "user"},
     {"ts": "Jun 5 09:18:02", "who": "M. Hanna", "act": "EVIDENCE_ADDED",
      "detail": "WS-0387_laptop.E01 · SHA-256 a3f1c9e0…f12b7 computed (read-only)",
      "kind": "user"},
@@ -536,13 +537,11 @@ ARCHIVE_NOTICE = ("The deleted archive was carved intact from unallocated space.
 
 # ── Launch / intake / analyzing ───────────────────────────────────────────────
 
+# Only the demo entry — a fresh install must never show fabricated case
+# history. Real entries come from the on-disk case store.
 RECENT_CASES = [
-    {"id": "FA-2026-0142", "title": "Suspected Data Exfiltration — Meridian Dynamics",
-     "meta": "Analyzed Jun 5 · 7 findings · 5 artifacts", "risk": "RISK 87", "hot": True},
-    {"id": "FA-2026-0117", "title": "Phishing triage — Hollis & Co.",
-     "meta": "Closed May 22 · 3 findings · 2 artifacts", "risk": "RISK 41", "hot": False},
-    {"id": "FA-2026-0098", "title": "HR device review — R. Patel",
-     "meta": "Closed May 02 · no findings · 1 artifact", "risk": "RISK 6", "hot": False},
+    {"id": "DEMO-001", "title": "Demo Case — Suspected Data Exfiltration",
+     "meta": "Demo fixture · 7 findings · 5 artifacts", "risk": "RISK 87", "hot": True},
 ]
 
 SUPPORTED_FORMATS = ("Disk images (E01 · dd · raw) · Windows event logs (EVTX) · "

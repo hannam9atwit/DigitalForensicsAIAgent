@@ -51,6 +51,7 @@ class EvidenceScreen(Screen):
         self.tier = 1
         self.art_cards = {}
         self.tier_cards = {}
+        self._ai_jobs = []
         self._build()
 
     def _build(self):
@@ -148,6 +149,7 @@ class EvidenceScreen(Screen):
             c.set_selected(k == eid)
         self._refresh_viewer()
         self.push_rail()
+        self._request_ai_meaning()
 
     def set_tier(self, tier):
         self.tier = tier
@@ -164,17 +166,51 @@ class EvidenceScreen(Screen):
         if e:
             self.viewer.show_artifact(e, self.tier)
 
+    def _request_ai_meaning(self):
+        """Generate the "what it means" note for the selected artifact.
+
+        The deterministic plain/role text is already on screen; when the model
+        finishes — and the user is still on the same artifact — push_rail()
+        swaps the richer interpretation in. Results cache on the artifact dict
+        so re-selection is instant.
+        """
+        artifact = self.find_artifact(self.sel)
+        if not artifact or artifact.get("ai_meaning") or not self.ai_config:
+            return
+
+        from ..ai_worker import SurfaceJob
+        job = SurfaceJob(self.ai_config)
+        job.result_ready.connect(self._ai_meaning_ready)
+        # Anchor against GC while the daemon thread runs; keep only recent jobs.
+        self._ai_jobs = self._ai_jobs[-8:] + [job]
+        job.run("what_it_means", token=artifact["id"], fallback="",
+                artifact=artifact, case=self.case)
+
+    def _ai_meaning_ready(self, artifact_id, text):
+        if not text:
+            return
+        artifact = self.find_artifact(artifact_id)
+        if artifact:
+            artifact["ai_meaning"] = text
+        if artifact_id == self.sel:
+            self.push_rail()
+
     def rail(self) -> RailPayload:
         e = self.find_artifact(self.sel)
         if not e:
             return RailPayload("Evidence", [
                 ("WHAT IS THIS?", "The artifacts registered to this case, with their "
                                   "chain-of-custody status.")])
+
+        blocks = [("WHAT IS THIS?", e.get("plain", "")),
+                  ("WHY AM I SEEING IT?", e.get("role", ""))]
+        if e.get("ai_meaning"):
+            blocks.append(("WHAT IT MEANS", e["ai_meaning"]))
+        blocks.append(EVIDENCE_SAFE_BLOCK)
+
         return RailPayload(
             title=f"{e['name']} — in plain terms",
-            blocks=[("WHAT IS THIS?", e.get("plain", "")),
-                    ("WHY AM I SEEING IT?", e.get("role", "")),
-                    EVIDENCE_SAFE_BLOCK],
+            blocks=blocks,
             steps=list(EVIDENCE_STEPS),
         )
 

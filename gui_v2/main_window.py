@@ -43,16 +43,16 @@ class AnalysisWorker(QObject):
     log = Signal(str)
     stage = Signal(int)
 
-    def __init__(self, builder, api_key=""):
+    def __init__(self, builder, ai_config=None):
         super().__init__()
         self.builder = builder
-        self.api_key = api_key
+        self.ai_config = ai_config or {}
 
     def run(self):
         try:
-            if self.api_key:
-                os.environ["ANTHROPIC_API_KEY"] = self.api_key
-            self.builder.analyze(log=self._log)
+            # The key travels in memory only — never via the process
+            # environment, which child processes would inherit.
+            self.builder.analyze(log=self._log, ai_config=self.ai_config)
             self.finished.emit(self.builder)
         except Exception as e:
             import traceback
@@ -85,8 +85,14 @@ class MainWindow(QMainWindow):
 
         self.builder = None
         self.case = empty_case()
+
+        from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
-                         "anthropic_api_key": ""}
+                         "anthropic_api_key": "",
+                         "ai_provider": "ollama",
+                         "ollama_model": "llama3.2:3b"}
+        self.settings.update(app_settings.load())
+        self.settings["anthropic_api_key"] = ""
         self.screens = {}
         self._current = None
 
@@ -248,7 +254,7 @@ class MainWindow(QMainWindow):
         self._enter_case()
         self.go("case")
         self.statusBar().showMessage(
-            "Demo case loaded — FA-2026-0142 (fixture data, no real evidence)", 6000)
+            "Demo case loaded — DEMO-001 (fixture data, no real evidence)", 6000)
 
     def _enter_case(self):
         """Build the case screens and show the full shell."""
@@ -266,16 +272,34 @@ class MainWindow(QMainWindow):
             "audit": AuditScreen(self.case),
             "settings": SettingsScreen(self.case, self.settings),
         }
+        ai_config = self._ai_config()
         for s in self.screens.values():
+            s.ai_config = ai_config
             self.stack.addWidget(s)
             s.rail_changed.connect(self.rail.set_payload)
             s.navigate.connect(self.go)
 
+        self.screens["settings"].changed.connect(self._settings_changed)
         self.screens["report"].export_requested.connect(self.export_report)
         self.screens["chat"].asked.connect(self._log_question)
 
         self._refresh_sidebar()
         self._refresh_status()
+
+    def _ai_config(self) -> dict:
+        """The user's engine choice, in the shape every AI module accepts."""
+        return {
+            "provider": self.settings.get("ai_provider", "ollama"),
+            "model": self.settings.get("ollama_model", "llama3.2:3b"),
+            "api_key": self.settings.get("anthropic_api_key", ""),
+        }
+
+    def _settings_changed(self, settings: dict):
+        from . import app_settings
+        app_settings.save(settings)
+        ai_config = self._ai_config()
+        for screen in self.screens.values():
+            screen.ai_config = ai_config
 
     def show_analyzing(self):
         self._clear_stack()
@@ -408,8 +432,7 @@ class MainWindow(QMainWindow):
             return
         self.show_analyzing()
         self.thread = QThread()
-        self.worker = AnalysisWorker(self.builder,
-                                     self.settings.get("anthropic_api_key", ""))
+        self.worker = AnalysisWorker(self.builder, self._ai_config())
         self.worker.moveToThread(self.thread)
         self.worker.log.connect(self._analysis_log)
         self.worker.stage.connect(lambda n: self._analyzing.set_step(n))

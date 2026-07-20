@@ -281,19 +281,17 @@ def generate_meaning(ev):
     something to be concerned about. This is deliberately SEPARATE from the EVENT
     column (which states *what happened* — the action + artifact).
 
-    INTEGRATION POINT for the forthcoming AI model. When the model is ready, call
-    it here and return its text. To keep the app fully offline it should follow
-    the same chain used elsewhere (local Ollama -> Claude API if a key is set ->
-    deterministic fallback). Until the model lands this returns the deterministic
-    interpreter note as a placeholder so the column is populated and never
-    duplicates the EVENT column.
+    This is deliberately deterministic. It runs during bulk enrichment over
+    every event in the timeline — thousands of synchronous LLM calls here would
+    stall analysis for hours on CPU. The AI-written interpretation exists, but
+    at the right layer: when the examiner selects an artifact, the evidence
+    screen generates its "what it means" asynchronously through
+    ai.surface_engine (validated against formats/what_it_means.md), with this
+    deterministic note as the instant text and the fallback.
 
     `ev` must already carry the interpreter's `note`/`description` (i.e. call this
     after interpret_event has run, as enrich_events does).
     """
-    # TODO(ai-model): replace the body below with the AI-generated explanation
-    #                 once the model is available; keep the deterministic note as
-    #                 the graceful-degradation fallback.
     note = (ev.get("note") or "").strip()
     if note:
         return note

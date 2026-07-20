@@ -1,72 +1,71 @@
 @echo off
 REM ============================================================
-REM build_windows.bat
+REM build_windows.bat — Windows build + installer pipeline.
 REM
-REM Builds the Forensic AI Agent for Windows and optionally
-REM packages it into a single installer .exe via Inno Setup.
+REM Produces:
+REM   dist\ForensicAIAgent\                  portable folder
+REM   dist\ForensicAIAgent_Setup-Full.exe    offline installer (~2.4 GB)
+REM   dist\ForensicAIAgent_Setup-Lite.exe    small installer (~500 MB)
 REM
 REM Requirements:
-REM   pip install pyinstaller pyside6 reportlab
-REM   Inno Setup 6 (optional, for installer):
-REM     https://jrsoftware.org/isinfo.php
+REM   Python 3.11+, pip install -r requirements.txt
+REM   Inno Setup 6           https://jrsoftware.org/isinfo.php
+REM   Ollama on this machine https://ollama.com  (Full variant only)
 REM ============================================================
 
 setlocal enabledelayedexpansion
-
-echo [*] Forensic AI Agent -- Windows Build Script
+echo [*] Forensic AI Agent -- Windows Build Pipeline
 echo.
 
-REM ── Check Python ─────────────────────────────────────────────
+REM -- Python + deps -------------------------------------------
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [!] Python not found. Install Python 3.11+ and add it to PATH.
     pause & exit /b 1
 )
+python -m pip install -q -r requirements.txt
 
-REM ── Check / install dependencies ─────────────────────────────
-pyinstaller --version >nul 2>&1
-if errorlevel 1 (
-    echo [*] Installing PyInstaller...
-    pip install pyinstaller
-)
-
-python -c "import PySide6" >nul 2>&1
-if errorlevel 1 (
-    echo [*] Installing PySide6...
-    pip install pyside6
-)
-
-python -c "import reportlab" >nul 2>&1
-if errorlevel 1 (
-    echo [*] Installing reportlab...
-    pip install reportlab
-)
-
-REM ── Clean previous build ─────────────────────────────────────
+REM -- Clean + PyInstaller -------------------------------------
 echo [*] Cleaning previous build...
-if exist build   rmdir /s /q build
-if exist dist    rmdir /s /q dist
+if exist build rmdir /s /q build
+if exist dist  rmdir /s /q dist
 
-REM ── Run PyInstaller ──────────────────────────────────────────
 echo [*] Running PyInstaller...
-pyinstaller forensic_agent.spec
-
+python -m PyInstaller forensic_agent.spec
 if errorlevel 1 (
     echo [!] PyInstaller failed. Check errors above.
     pause & exit /b 1
 )
-
 if not exist "dist\ForensicAIAgent\ForensicAIAgent.exe" (
-    echo [!] Build succeeded but .exe not found -- check spec file.
+    echo [!] Build succeeded but .exe not found -- check the spec file.
     pause & exit /b 1
 )
-
-echo [+] PyInstaller build complete: dist\ForensicAIAgent\
-
-REM ── Inno Setup (optional) ────────────────────────────────────
+echo [+] Portable build complete: dist\ForensicAIAgent\
 echo.
-echo [*] Checking for Inno Setup...
 
+REM -- Installer payloads --------------------------------------
+if not exist redist mkdir redist
+
+if not exist "redist\OllamaSetup.exe" (
+    echo [*] Downloading OllamaSetup.exe...
+    curl -L -o "redist\OllamaSetup.exe" "https://ollama.com/download/OllamaSetup.exe"
+    if errorlevel 1 (
+        echo [!] Ollama download failed -- installers will be skipped.
+        pause & exit /b 1
+    )
+)
+
+if not exist "redist\ollama-models\manifests" (
+    echo [*] Staging model payload for the Full installer...
+    python tools\prepare_model_payload.py
+    if errorlevel 1 (
+        echo [~] Model payload unavailable -- Full installer will be skipped.
+        echo     Run `ollama pull llama3.2:3b` on this machine, then rebuild.
+        set SKIP_FULL=1
+    )
+)
+
+REM -- Inno Setup ----------------------------------------------
 set ISCC=
 if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     set ISCC="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -74,23 +73,28 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     set ISCC="C:\Program Files\Inno Setup 6\ISCC.exe"
 )
 
-if defined ISCC (
-    echo [*] Inno Setup found -- building installer...
-    %ISCC% ForensicAIAgent_Setup.iss
-    if errorlevel 1 (
-        echo [!] Inno Setup failed. Portable folder is still available in dist\ForensicAIAgent\
-    ) else (
-        echo [+] Installer created: dist\ForensicAIAgent_Setup.exe
-    )
-) else (
-    echo [~] Inno Setup not found -- skipping installer creation.
-    echo     Download from https://jrsoftware.org/isinfo.php to build a single-file installer.
-    echo     The portable folder at dist\ForensicAIAgent\ still works -- zip it to distribute.
+if not defined ISCC (
+    echo [~] Inno Setup not found -- skipping installers.
+    echo     Download from https://jrsoftware.org/isinfo.php
+    echo     The portable folder at dist\ForensicAIAgent\ still works.
+    goto done
 )
 
+echo [*] Building LITE installer (model downloads on first launch)...
+%ISCC% /Q /DLITE ForensicAIAgent_Setup.iss
+if errorlevel 1 echo [!] Lite installer failed.
+
+if not defined SKIP_FULL (
+    echo [*] Building FULL installer (fully offline, ~2.4 GB)...
+    %ISCC% /Q ForensicAIAgent_Setup.iss
+    if errorlevel 1 echo [!] Full installer failed.
+)
+
+:done
 echo.
-echo [+] Build complete!
-echo     Portable folder : dist\ForensicAIAgent\
-if defined ISCC echo     Installer       : dist\ForensicAIAgent_Setup.exe
+echo [+] Build pipeline finished.
+echo     Portable : dist\ForensicAIAgent\
+echo     Lite     : dist\ForensicAIAgent_Setup-Lite.exe  (GitHub Releases)
+echo     Full     : dist\ForensicAIAgent_Setup-Full.exe  (website download)
 echo.
 pause

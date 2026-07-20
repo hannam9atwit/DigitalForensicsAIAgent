@@ -50,7 +50,5 @@ class ReasoningEngine:
         result_dict["narrative"] = narrative_text
 
         # Debug prints
-        print("[DEBUG] findings type:", type(findings), findings[:3] if isinstance(findings, list) else findings)
-        print("[DEBUG] anomalies type:", type(anomalies), anomalies[:3] if isinstance(anomalies, list) else anomalies)
 
         return result_dict

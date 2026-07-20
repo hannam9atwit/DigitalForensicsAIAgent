@@ -13,8 +13,6 @@ anti-forensic indicator in its own right.
 class RuleEngine:
 
     def run(self, disk_data, browser_data, unified_timeline):
-        print("[DEBUG] RuleEngine disk_data type:", type(disk_data))
-        print("[DEBUG] RuleEngine disk events sample:", disk_data.get("events", [])[:3])
 
         findings    = []
         disk_events = disk_data.get("events", [])

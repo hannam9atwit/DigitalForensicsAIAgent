@@ -29,6 +29,10 @@ class Screen(QWidget):
 
     id = ""
 
+    # The user's AI engine choice ({provider, model, api_key}); assigned by
+    # the window after construction and refreshed when settings change.
+    ai_config = None
+
     def __init__(self, case: dict, parent=None):
         super().__init__(parent)
         self.case = case

@@ -90,7 +90,7 @@ def empty_case():
             "id": "—", "title": "No case loaded", "examiner": "—", "examinerId": "—",
             "agency": "—", "opened": "—", "custodian": "—",
             "riskScore": 0, "riskLabel": "—",
-            "aiEngine": {"provider": "OpenClaw → Ollama (local)", "model": "llama3.2:3b",
+            "aiEngine": {"provider": "Ollama (local)", "model": "llama3.2:3b",
                          "status": "idle", "fallback": "Claude API → Rule-based"},
             "pipeline": {"lastRun": "—", "duration": "—", "eventsParsed": 0, "status": "idle"},
         },
@@ -157,12 +157,12 @@ class CaseBuilder:
 
     # ── analysis ──────────────────────────────────────────────────────────────
 
-    def analyze(self, log=print):
+    def analyze(self, log=print, ai_config=None):
         """Run every evidence item through its parser, merge, reason, narrate."""
         from .pipeline_router import run_analysis
         self._log("ANALYSIS_STARTED",
                   f"Full pipeline · {len(self.evidence)} artifacts queued", who="system")
-        self.analysis = run_analysis(self.evidence, log=log)
+        self.analysis = run_analysis(self.evidence, log=log, ai_config=ai_config)
         self._log("ANALYSIS_COMPLETE",
                   f"{len(self.analysis['events'])} events · "
                   f"{len(self.analysis['findings'])} findings", who="system")

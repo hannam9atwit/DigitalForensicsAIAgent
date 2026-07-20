@@ -21,11 +21,6 @@ class ToolRunner:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
         self.tsk_path = os.path.join(base, "bin", "sleuthkit")
-        print(f"[DEBUG] ToolRunner base     : {base}")
-        print(f"[DEBUG] ToolRunner tsk_path : {self.tsk_path}")
-        print(f"[DEBUG] tsk_path exists     : {os.path.exists(self.tsk_path)}")
-        if os.path.exists(self.tsk_path):
-            print(f"[DEBUG] tsk_path contents   : {os.listdir(self.tsk_path)}")
 
     def _resolve(self, tool_name: str):
         for candidate in [
@@ -33,14 +28,11 @@ class ToolRunner:
             os.path.join(self.tsk_path, tool_name),
         ]:
             if os.path.exists(candidate):
-                print(f"[DEBUG] Resolved {tool_name} -> {candidate}")
                 return candidate
 
         # Last resort: check system PATH
         found = shutil.which(tool_name)
-        if found:
-            print(f"[DEBUG] Resolved {tool_name} from PATH -> {found}")
-        else:
+        if not found:
             print(f"[!] Could not resolve tool: {tool_name}")
             print(f"    Looked in: {self.tsk_path}")
         return found
@@ -64,8 +56,6 @@ class ToolRunner:
 
             if self._is_ewf(normed) and "-i" not in cmd:
                 cmd = [cmd[0], "-i", "ewf"] + cmd[1:]
-
-        print(f"[DEBUG] Running: {' '.join(cmd)}")
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, shell=False)

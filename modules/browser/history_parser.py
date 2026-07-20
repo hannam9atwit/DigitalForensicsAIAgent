@@ -62,5 +62,5 @@ class HistoryParser:
         try:
             unix_time = (chrome_time / 1_000_000) - 11644473600
             return unix_time
-        except:
+        except (ValueError, TypeError, KeyError, IndexError):
             return None

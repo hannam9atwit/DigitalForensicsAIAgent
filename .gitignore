@@ -40,3 +40,5 @@ data/
 .DS_Store
 Thumbs.db
 desktop.ini
+# Installer payload staging (Ollama setup + model blobs, prepared at build time)
+redist/
