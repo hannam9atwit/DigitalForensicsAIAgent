@@ -80,15 +80,16 @@ if not defined ISCC (
     goto done
 )
 
-echo [*] Building LITE installer (model downloads on first launch)...
+REM Parentheses in echo text inside if-blocks break cmd's parser, so the
+REM installer builds use plain goto flow instead of blocks.
+echo [*] Building LITE installer - model downloads on first launch...
 %ISCC% /Q /DLITE AIRforensics_Setup.iss
 if errorlevel 1 echo [!] Lite installer failed.
 
-if not defined SKIP_FULL (
-    echo [*] Building FULL installer (fully offline, ~2.4 GB)...
-    %ISCC% /Q AIRforensics_Setup.iss
-    if errorlevel 1 echo [!] Full installer failed.
-)
+if defined SKIP_FULL goto done
+echo [*] Building FULL installer - fully offline, large...
+%ISCC% /Q AIRforensics_Setup.iss
+if errorlevel 1 echo [!] Full installer failed.
 
 :done
 echo.
