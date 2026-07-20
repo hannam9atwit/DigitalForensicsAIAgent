@@ -57,7 +57,9 @@ class SettingsScreen(Screen):
         ai.add(w.label("Engine", size=12, color=P["text2"]))
         self._provider = QComboBox()
         self._provider.addItem("Ollama — local model (default)", "ollama")
-        self._provider.addItem("Anthropic — cloud, needs API key", "anthropic")
+        self._provider.addItem("Anthropic Claude — cloud, needs API key", "anthropic")
+        self._provider.addItem("OpenAI ChatGPT — cloud, needs API key", "openai")
+        self._provider.addItem("Google Gemini — cloud, needs API key", "gemini")
         self._provider.addItem("Rule-based only — no AI", "none")
         current = self.settings.get("ai_provider", "ollama")
         self._provider.setCurrentIndex(
@@ -88,10 +90,11 @@ class SettingsScreen(Screen):
         ai.add(w.kv_row("Fallback order",
                         "Chosen engine → Rule-based (automatic)"))
         ai.add(w.spacer(h=10))
-        ai.add(w.label("Anthropic API key (optional)", size=12, color=P["text2"]))
-        self._key = QLineEdit(self.settings.get("anthropic_api_key", ""))
+        ai.add(w.label("Cloud API key (used only for the cloud engine selected above)",
+                       size=12, color=P["text2"]))
+        self._key = QLineEdit(self.settings.get("cloud_api_key", ""))
         self._key.setEchoMode(QLineEdit.Password)
-        self._key.setPlaceholderText("sk-ant-…  (blank = fully offline)")
+        self._key.setPlaceholderText("API key…  (blank = fully offline)")
         self._key.textChanged.connect(self._emit)
         ai.add(self._key)
         ai.add(w.body(
@@ -135,7 +138,7 @@ class SettingsScreen(Screen):
             "examiner": self._name.text().strip(),
             "examiner_id": self._id.text().strip(),
             "agency": self._agency.text().strip(),
-            "anthropic_api_key": self._key.text().strip(),
+            "cloud_api_key": self._key.text().strip(),
             "ai_provider": self._provider.currentData(),
             "ollama_model": self._model.text().strip() or "llama3.2:3b",
         })

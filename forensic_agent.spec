@@ -3,7 +3,7 @@
 # Build with:
 #   pyinstaller forensic_agent.spec
 #
-# Output: dist/ForensicAIAgent/ (onedir mode — faster startup, bin/ folder accessible)
+# Output: dist/AIRforensics/ (onedir mode — faster startup, bin/ folder accessible)
 
 import sys
 import os
@@ -113,7 +113,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ForensicAIAgent",
+    name="AIRforensics",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -130,5 +130,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="ForensicAIAgent",
+    name="AIRforensics",
 )

@@ -1,5 +1,5 @@
 ; ============================================================================
-; ForensicAIAgent_Setup.iss — Windows installer (Inno Setup 6)
+; AIRforensics_Setup.iss — Windows installer (Inno Setup 6)
 ;
 ; Product name is TBD: change AppName below (and nothing else) when the final
 ; name lands. Everything — folders, shortcuts, uninstall entry — follows it.
@@ -28,15 +28,15 @@
 ;   ollama pull llama3.2:3b                       (Full only, build machine)
 ;   python tools\prepare_model_payload.py         (Full only)
 ;   <download OllamaSetup.exe into redist\>       https://ollama.com/download/OllamaSetup.exe
-;   ISCC ForensicAIAgent_Setup.iss                (Full)
-;   ISCC /DLITE ForensicAIAgent_Setup.iss         (Lite)
+;   ISCC AIRforensics_Setup.iss                (Full)
+;   ISCC /DLITE AIRforensics_Setup.iss         (Lite)
 ; ============================================================================
 
-#define AppName      "Forensic AI Agent"
+#define AppName      "AIRforensics"
 #define AppVersion   "1.0.0"
 #define AppPublisher "AOX LLC"
-#define AppExeName   "ForensicAIAgent.exe"
-#define AppId        "ForensicAIAgent"
+#define AppExeName   "AIRforensics.exe"
+#define AppId        "AIRforensics"
 
 #ifdef LITE
   #define VariantSuffix "-Lite"
@@ -70,7 +70,7 @@ Name: "installollama"; Description: "Install Ollama and set up local AI (recomme
     GroupDescription: "Local AI:"
 
 [Files]
-Source: "dist\ForensicAIAgent\*"; DestDir: "{app}"; \
+Source: "dist\AIRforensics\*"; DestDir: "{app}"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
 
 Source: "redist\OllamaSetup.exe"; DestDir: "{tmp}"; \
@@ -109,7 +109,7 @@ var
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    DataDir := ExpandConstant('{userappdata}\ForensicAIAgent');
+    DataDir := ExpandConstant('{userappdata}\AIRforensics');
     if DirExists(DataDir) then
     begin
       if MsgBox('Also delete saved cases and app settings?' + #13#10 +

@@ -14,7 +14,7 @@ import os
 
 from .case_store import app_data_dir
 
-_NEVER_PERSIST = ("anthropic_api_key",)
+_NEVER_PERSIST = ("cloud_api_key",)
 
 
 def _settings_path() -> str:

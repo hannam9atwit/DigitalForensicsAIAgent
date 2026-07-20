@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Forensic AI Agent")
+        self.setWindowTitle("AIRforensics")
         self.resize(1440, 900)
         self.setMinimumSize(1100, 700)
 
@@ -88,11 +88,11 @@ class MainWindow(QMainWindow):
 
         from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
-                         "anthropic_api_key": "",
+                         "cloud_api_key": "",
                          "ai_provider": "ollama",
                          "ollama_model": "llama3.2:3b"}
         self.settings.update(app_settings.load())
-        self.settings["anthropic_api_key"] = ""
+        self.settings["cloud_api_key"] = ""
         self.screens = {}
         self._current = None
 
@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         return {
             "provider": self.settings.get("ai_provider", "ollama"),
             "model": self.settings.get("ollama_model", "llama3.2:3b"),
-            "api_key": self.settings.get("anthropic_api_key", ""),
+            "api_key": self.settings.get("cloud_api_key", ""),
         }
 
     def _settings_changed(self, settings: dict):
@@ -619,8 +619,8 @@ class MainWindow(QMainWindow):
 
     def _about(self):
         QMessageBox.about(
-            self, "Forensic AI Agent",
-            "Forensic AI Agent\n\n"
+            self, "AIRforensics",
+            "AIRforensics\n\n"
             "An offline digital forensics investigation platform.\n"
             "Evidence is hashed on intake, opened read-only, and never executed.\n"
             "The AI narrative runs on a local model by default.")

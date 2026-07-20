@@ -302,7 +302,10 @@ def _summary(analysis, findings, evidence, pipeline):
             text = " ".join(l.strip() for l in block.splitlines()
                             if l.strip() and not l.strip().startswith(("#", "-", "*")))
             if len(text) > 80:
-                return text
+                # Same sanitizer the PDF uses: the model's markdown must never
+                # reach a rendered surface (** and backticks in the preview).
+                from .report_pdf import _clean
+                return _clean(text)
     crit = sum(1 for f in findings if f["sev"] == "CRITICAL")
     return (f"{len(evidence)} artifact(s) were examined and parsed into "
             f"{pipeline.get('eventsParsed', 0):,} events. The analysis produced "

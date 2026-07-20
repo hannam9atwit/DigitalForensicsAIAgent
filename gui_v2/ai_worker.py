@@ -31,14 +31,15 @@ from ai.surface_engine import SurfaceEngine
 class SurfaceJob(QObject):
     """One generation on a background daemon thread, one signal back."""
 
-    result_ready = Signal(str, str)  # (token, generated_text)
+    result_ready = Signal(str, str)     # (token, generated_text)
+    answer_ready = Signal(str, object)  # (token, answer_dict | None) — ask only
 
     def __init__(self, ai_config: dict, parent=None):
         super().__init__(parent)
         self._engine = SurfaceEngine(ai_config)
 
     def run(self, kind: str, token: str, fallback: str, **kwargs):
-        """Start a generation. kind ∈ {overview, plain_terms, what_it_means}."""
+        """Start a generation. kind ∈ {overview, plain_terms, what_it_means, ask}."""
         worker = threading.Thread(
             target=self._generate,
             args=(kind, token, fallback, kwargs),
@@ -48,6 +49,14 @@ class SurfaceJob(QObject):
         worker.start()
 
     def _generate(self, kind, token, fallback, kwargs):
+        if kind == "ask":
+            try:
+                answer = self._engine.ask(kwargs["question"], kwargs["case"])
+            except Exception:
+                answer = None
+            self.answer_ready.emit(token, answer)
+            return
+
         try:
             if kind == "overview":
                 text = self._engine.case_overview(kwargs["case"], fallback)

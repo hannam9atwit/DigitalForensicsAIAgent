@@ -3,9 +3,9 @@ REM ============================================================
 REM build_windows.bat — Windows build + installer pipeline.
 REM
 REM Produces:
-REM   dist\ForensicAIAgent\                  portable folder
-REM   dist\ForensicAIAgent_Setup-Full.exe    offline installer (~2.4 GB)
-REM   dist\ForensicAIAgent_Setup-Lite.exe    small installer (~500 MB)
+REM   dist\AIRforensics\                  portable folder
+REM   dist\AIRforensics_Setup-Full.exe    offline installer (~2.4 GB)
+REM   dist\AIRforensics_Setup-Lite.exe    small installer (~500 MB)
 REM
 REM Requirements:
 REM   Python 3.11+, pip install -r requirements.txt
@@ -14,7 +14,7 @@ REM   Ollama on this machine https://ollama.com  (Full variant only)
 REM ============================================================
 
 setlocal enabledelayedexpansion
-echo [*] Forensic AI Agent -- Windows Build Pipeline
+echo [*] AIRforensics -- Windows Build Pipeline
 echo.
 
 REM -- Python + deps -------------------------------------------
@@ -36,11 +36,11 @@ if errorlevel 1 (
     echo [!] PyInstaller failed. Check errors above.
     pause & exit /b 1
 )
-if not exist "dist\ForensicAIAgent\ForensicAIAgent.exe" (
+if not exist "dist\AIRforensics\AIRforensics.exe" (
     echo [!] Build succeeded but .exe not found -- check the spec file.
     pause & exit /b 1
 )
-echo [+] Portable build complete: dist\ForensicAIAgent\
+echo [+] Portable build complete: dist\AIRforensics\
 echo.
 
 REM -- Installer payloads --------------------------------------
@@ -76,25 +76,25 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
 if not defined ISCC (
     echo [~] Inno Setup not found -- skipping installers.
     echo     Download from https://jrsoftware.org/isinfo.php
-    echo     The portable folder at dist\ForensicAIAgent\ still works.
+    echo     The portable folder at dist\AIRforensics\ still works.
     goto done
 )
 
 echo [*] Building LITE installer (model downloads on first launch)...
-%ISCC% /Q /DLITE ForensicAIAgent_Setup.iss
+%ISCC% /Q /DLITE AIRforensics_Setup.iss
 if errorlevel 1 echo [!] Lite installer failed.
 
 if not defined SKIP_FULL (
     echo [*] Building FULL installer (fully offline, ~2.4 GB)...
-    %ISCC% /Q ForensicAIAgent_Setup.iss
+    %ISCC% /Q AIRforensics_Setup.iss
     if errorlevel 1 echo [!] Full installer failed.
 )
 
 :done
 echo.
 echo [+] Build pipeline finished.
-echo     Portable : dist\ForensicAIAgent\
-echo     Lite     : dist\ForensicAIAgent_Setup-Lite.exe  (GitHub Releases)
-echo     Full     : dist\ForensicAIAgent_Setup-Full.exe  (website download)
+echo     Portable : dist\AIRforensics\
+echo     Lite     : dist\AIRforensics_Setup-Lite.exe  (GitHub Releases)
+echo     Full     : dist\AIRforensics_Setup-Full.exe  (website download)
 echo.
 pause

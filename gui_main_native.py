@@ -39,7 +39,7 @@ def _remember_setup_skipped():
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Forensic AI Agent")
+    app.setApplicationName("AIRforensics")
 
     from gui_v2 import theme
     sans, mono = theme.load_fonts()

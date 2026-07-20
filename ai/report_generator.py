@@ -158,7 +158,7 @@ class ReportGenerator:
         story.append(Spacer(1, 0.3*cm))
 
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        story.append(Paragraph(f"Generated: {now} | Forensic AI Agent", s_subtitle))
+        story.append(Paragraph(f"Generated: {now} | AIRforensics", s_subtitle))
         story.append(Spacer(1, 0.5*cm))
 
         # Summary stats bar

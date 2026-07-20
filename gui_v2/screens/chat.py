@@ -12,11 +12,13 @@ Three design rules do the real work here, and all three are about trust:
   * It is obvious this runs locally. Offline operation is a hard product
     requirement, so the header states the engine rather than implying it.
 
-The canned demo answers are the quality bar the real model output is held to:
-multi-paragraph, sourced, and explicit about what it cannot establish.
+The canned demo answers remain as the quality bar and the offline fallback:
+when an AI engine is configured and reachable the question goes to it (scoped
+to this case's data); when none is, suggested demo questions still answer from
+the fixtures so the screen demonstrates itself.
 """
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QFrame, QLineEdit, QSizePolicy,
 )
@@ -47,7 +49,7 @@ class ChatScreen(Screen):
         super().__init__(case, parent)
         self.msgs = []
         self.thinking = False
-        self._timer = None
+        self._ai_job = None
         self._build()
 
     def _build(self):
@@ -63,9 +65,8 @@ class ChatScreen(Screen):
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(10)
         head.addWidget(w.label("Ask the AI", size=19, weight=theme.W_SEMIBOLD))
-        engine = self.case.get("caseMeta", {}).get("aiEngine", {})
-        head.addWidget(w.Pill(
-            f"LOCAL MODEL · {engine.get('model','llama3.2')} · OFFLINE"))
+        self._engine_pill = w.Pill("LOCAL MODEL · OFFLINE")
+        head.addWidget(self._engine_pill)
         head.addStretch(1)
         lay.addLayout(head)
 
@@ -101,6 +102,19 @@ class ChatScreen(Screen):
         self._render()
 
     # ── thread ────────────────────────────────────────────────────────────────
+
+    def on_show(self, arg=None):
+        super().on_show(arg)
+        self._engine_pill.setText(self._engine_label())
+
+    def _engine_label(self):
+        config = self.ai_config or {}
+        provider = config.get("provider", "ollama")
+        if provider == "ollama":
+            return f"LOCAL MODEL · {config.get('model', 'llama3.2')} · OFFLINE"
+        if provider == "none":
+            return "RULE-BASED · NO AI"
+        return f"CLOUD · {provider.upper()} · KEY IN MEMORY"
 
     def _render(self):
         w.clear_layout(self._thread)
@@ -211,19 +225,27 @@ class ChatScreen(Screen):
         self._render()
         self.asked.emit(text)
 
-        # The demo answers stand in for a local model call. A real one would run
-        # on a worker thread; the delay keeps the "thinking" state visible so
-        # the ghost bubble is not dead code when the model is wired in.
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(lambda: self._answer(idx))
-        self._timer.start(900)
+        from ..ai_worker import SurfaceJob
+        job = SurfaceJob(self.ai_config or {})
+        job.answer_ready.connect(
+            lambda _token, answer, i=idx: self._answer(answer, i))
+        self._ai_job = job
+        job.run("ask", token="ask", fallback="",
+                question=text, case=self.case)
 
-    def _answer(self, idx):
-        a = ANSWERS[idx] if 0 <= idx < len(ANSWERS) else FALLBACK_ANSWER
+    def _answer(self, ai_answer, idx):
+        """Prefer the model's answer; fall back to the demo fixtures for
+        suggested questions, and to an honest capability note otherwise."""
+        if ai_answer and ai_answer.get("paras"):
+            answer = ai_answer
+        elif 0 <= idx < len(ANSWERS):
+            answer = ANSWERS[idx]
+        else:
+            answer = FALLBACK_ANSWER
         self.msgs.append({
-            "user": False, "paras": list(a["paras"]),
-            "uncertain": a.get("uncertain", ""), "chips": list(a.get("chips", [])),
+            "user": False, "paras": list(answer["paras"]),
+            "uncertain": answer.get("uncertain", ""),
+            "chips": list(answer.get("chips", [])),
         })
         self.thinking = False
         self._render()

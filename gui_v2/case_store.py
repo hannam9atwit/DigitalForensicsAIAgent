@@ -24,7 +24,7 @@ def app_data_dir() -> str:
         base = os.path.expanduser("~/Library/Application Support")
     else:
         base = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
-    path = os.path.join(base, "ForensicAIAgent", "cases")
+    path = os.path.join(base, "AIRforensics", "cases")
     os.makedirs(path, exist_ok=True)
     return path
 

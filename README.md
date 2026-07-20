@@ -1,7 +1,7 @@
-# Forensic AI Agent
+# AIRforensics
 
 > **Note:** the product name is still being finalized. To rebrand, change
-> `AppName` in `ForensicAIAgent_Setup.iss` and `setApplicationName` in
+> `AppName` in `AIRforensics_Setup.iss` and `setApplicationName` in
 > `gui_main_native.py`.
 
 A digital forensics investigation console powered by a local LLM (Ollama),
@@ -94,5 +94,5 @@ formats/               AI output format specs (edit these, not code)
 core/                  ollama_runtime, SleuthKit tool runners, parsers
 modules/, pipeline/    artifact parsers and the analysis pipeline
 tools/                 build tooling (model payload staging)
-ForensicAIAgent_Setup.iss   Windows installer (Full + Lite variants)
+AIRforensics_Setup.iss   Windows installer (Full + Lite variants)
 ```
