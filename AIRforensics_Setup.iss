@@ -1,45 +1,21 @@
 ; ============================================================================
 ; AIRforensics_Setup.iss — Windows installer (Inno Setup 6)
 ;
-; Two variants build from this one script:
-;   FULL (default)         — bundles OllamaSetup.exe AND the model blobs.
-;                            ~2.4 GB, installs fully offline. Host on the
-;                            website (exceeds GitHub's 2 GiB release limit).
-;   LITE (/DLITE on ISCC)  — bundles only OllamaSetup.exe; the app pulls the
-;                            model on first launch. ~500 MB, fits GitHub
-;                            Releases.
-;
-; Design decisions worth knowing:
-;   * PER-USER install (PrivilegesRequired=lowest). Ollama's own installer is
-;     per-user; if this installer ran elevated, Ollama would install for the
-;     admin account instead of the person using the app, and the model blobs
-;     would land in the wrong profile's ~/.ollama. Per-user also means no UAC
-;     prompt at all.
-;   * Ollama's installer is Inno Setup too, so /VERYSILENT is its silent flag.
-;   * Model blobs copy into {%USERPROFILE}\.ollama\models — the layout
-;     tools/prepare_model_payload.py stages. Ollama discovers them with no
-;     pull and no network.
-;
 ; Build:
 ;   pyinstaller forensic_agent.spec
-;   ollama pull llama3.2:3b                       (Full only, build machine)
-;   python tools\prepare_model_payload.py         (Full only)
-;   <download OllamaSetup.exe into redist\>       https://ollama.com/download/OllamaSetup.exe
-;   ISCC AIRforensics_Setup.iss                (Full)
-;   ISCC /DLITE AIRforensics_Setup.iss         (Lite)
+;   <download OllamaSetup.exe into redist\>  https://ollama.com/download/OllamaSetup.exe
+;   ISCC AIRforensics_Setup.iss
+;
+; The installer bundles the app and the Ollama runtime; the language model
+; downloads on first launch. That keeps the installer inside GitHub's 2 GiB
+; release-asset limit, so one file ships everywhere.
 ; ============================================================================
 
 #define AppName      "AIRforensics"
-#define AppVersion   "1.1.0"
+#define AppVersion   "1.2.0"
 #define AppPublisher "AOX LLC"
 #define AppExeName   "AIRforensics.exe"
 #define AppId        "AIRforensics"
-
-#ifdef LITE
-  #define VariantSuffix "-Lite"
-#else
-  #define VariantSuffix "-Full"
-#endif
 
 [Setup]
 AppId={#AppId}
@@ -51,14 +27,12 @@ DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 OutputDir=dist
-OutputBaseFilename={#AppId}_Setup{#VariantSuffix}
+OutputBaseFilename={#AppId}_Setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExeName}
 SetupIconFile=assets\app.ico
-; The model blobs are already compressed; recompressing 2 GB gains almost
-; nothing and multiplies build time. lzma2/max still applies to the app files.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
@@ -73,10 +47,6 @@ Source: "dist\AIRforensics\*"; DestDir: "{app}"; \
 Source: "redist\OllamaSetup.exe"; DestDir: "{tmp}"; \
     Flags: deleteafterinstall; Tasks: installollama
 
-#ifndef LITE
-Source: "redist\ollama-models\*"; DestDir: "{%USERPROFILE}\.ollama\models"; \
-    Flags: recursesubdirs createallsubdirs uninsneveruninstall; Tasks: installollama
-#endif
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

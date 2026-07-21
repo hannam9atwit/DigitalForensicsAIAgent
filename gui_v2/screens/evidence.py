@@ -22,10 +22,19 @@ from PySide6.QtWidgets import QVBoxLayout, QHBoxLayout, QWidget, QFrame
 
 from .. import theme, widgets as w
 from ..content import (
-    TIERS, SEALED_NOTE, HEX_LINES, HISTORY_ROWS, HISTORY_CAPTION, REGISTRY_ROWS,
-    TREE_ROWS, ARCHIVE_ROWS, ARCHIVE_NOTICE, EVIDENCE_SAFE_BLOCK, EVIDENCE_STEPS,
+    TIERS, SEALED_NOTE, EVIDENCE_SAFE_BLOCK, EVIDENCE_STEPS,
 )
 from ..rail import RailPayload
+
+
+def _human_size(num_bytes):
+    """Render a byte count as a readable size (real measured file size)."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num_bytes} B"
 from .base import Screen
 
 P = theme.GUIDED
@@ -164,7 +173,7 @@ class EvidenceScreen(Screen):
                 f"background: {P['accent'] if on else P['line']}; border-radius: 3px;")
         e = self.find_artifact(self.sel)
         if e:
-            self.viewer.show_artifact(e, self.tier)
+            self.viewer.show_artifact(e, self.tier, self.case)
 
     def _request_ai_meaning(self):
         """Generate the "what it means" note for the selected artifact.
@@ -219,6 +228,8 @@ class _Viewer(QFrame):
     """The sealed viewer panel: header with a permanent read-only pill, and a
     body that swaps by tier and artifact kind."""
 
+    case = None
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("card")
@@ -241,7 +252,8 @@ class _Viewer(QFrame):
         self._body.setSpacing(12)
         v.addWidget(self._body_host, 1)
 
-    def show_artifact(self, e, tier):
+    def show_artifact(self, e, tier, case=None):
+        self._case_ref = case or {}
         w.clear_layout(self._body)
         self._title.setText(f"{e['name']} · {e.get('kindLabel', '')} · "
                             f"{TIERS[tier - 1][0]}")
@@ -265,15 +277,29 @@ class _Viewer(QFrame):
         hv = QVBoxLayout(hexbox)
         hv.setContentsMargins(14, 12, 14, 12)
         hv.setSpacing(2)
-        for i, line in enumerate(HEX_LINES):
-            last = (i == len(HEX_LINES) - 1)
-            # 10px, not the design's 11: a 16-byte row is 406px at 11px, which
-            # pushes the viewer past the width available between the sidebar and
-            # the rail at 1440. 10px brings the row to 348px and the column fits.
+
+        # Real bytes from the selected artifact — read read-only, nothing
+        # hardcoded. The signature line at the bottom is detected from those
+        # bytes, not assumed from the file name.
+        from ..artifact_viewer import raw_preview
+        preview = raw_preview(e.get("_path", ""))
+        self._raw_preview_cache = preview  # used by the metadata column below
+
+        if preview.get("error"):
+            hv.addWidget(w.body(preview["error"], size=11, color=P["sevMedium"],
+                                lh=1.4))
+        else:
+            # 10px keeps a 16-byte row inside the viewer width at 1440.
+            for offset, hex_part, ascii_part in preview["hex_lines"][:20]:
+                hv.addWidget(w.label(
+                    f"{offset}  {hex_part}  {ascii_part}",
+                    size=HEX_SIZE, mono=True, color=P["text2"],
+                    weight=theme.W_REGULAR))
+            hv.addWidget(w.spacer(h=4))
             hv.addWidget(w.label(
-                line, size=HEX_SIZE, mono=True,
-                color=P["good"] if last else P["text2"],
-                weight=theme.W_MEDIUM if last else theme.W_REGULAR))
+                f"SIGNATURE  {preview['signature']}",
+                size=HEX_SIZE, mono=True, color=P["good"],
+                weight=theme.W_MEDIUM))
         row.addWidget(hexbox, 1)
 
         meta = QWidget()
@@ -281,9 +307,16 @@ class _Viewer(QFrame):
         mv = QVBoxLayout(meta)
         mv.setContentsMargins(0, 0, 0, 0)
         mv.setSpacing(0)
+        # Prefer the real on-disk size we just measured; fall back to the
+        # stored label only if the file could not be read.
+        preview = getattr(self, "_raw_preview_cache", {})
+        real_size = e.get("size", "—")
+        if preview.get("size_bytes") is not None:
+            real_size = _human_size(preview["size_bytes"])
+
         rows = [
-            ("File", e["name"]), ("Size", e.get("size", "—")),
-            ("SHA-256", (e.get("sha", "")[:16] + "…") if e.get("sha") else "—"),
+            ("File", e["name"]), ("Size", real_size),
+            ("SHA-256", e.get("sha", "—") or "—"),
             ("Intake", e.get("intake", "—")),
             ("Integrity", "Verified ✓" if e.get("verified") else "Pending"),
             ("Access", "Read-only"),
@@ -300,135 +333,198 @@ class _Viewer(QFrame):
         mv.addStretch(1)
         row.addWidget(meta)
         self._body.addLayout(row)
+        self._derived_events(e)
+
+    def _derived_events(self, e):
+        """The events this artifact contributed to the timeline.
+
+        This is the per-artifact drill-down: metadata and bytes above, the
+        artifact's own share of the timeline here. Events carry the id of the
+        artifact they were parsed from, so this is a real filter, not a guess.
+        """
+        events = [ev for ev in (self.case or {}).get("events", [])
+                  if ev.get("artifact") == e.get("id")]
+
+        self._body.addWidget(w.spacer(h=6))
+        self._body.addWidget(w.micro_label(
+            f"EVENTS FROM THIS ARTIFACT ({len(events)})"))
+        self._body.addWidget(w.hline(P["line"]))
+
+        if not events:
+            self._body.addWidget(w.body(
+                "This artifact contributed no events to the timeline. If that "
+                "is unexpected, the audit trail records why its parser produced "
+                "nothing.", size=11.5, color=P["text3"], lh=1.45))
+            return
+
+        for event in events[:25]:
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 6, 0, 6)
+            line.setSpacing(12)
+            stamp = w.label(str(event.get("ts", "")), size=10.5, mono=True,
+                            color=P["text3"])
+            stamp.setFixedWidth(140)
+            line.addWidget(stamp)
+            line.addWidget(w.body(str(event.get("label", "")), size=11.5,
+                                  weight=theme.W_REGULAR, lh=1.3), 1)
+            self._body.addLayout(line)
+            self._body.addWidget(w.hline())
+
+        if len(events) > 25:
+            self._body.addWidget(w.body(
+                f"Showing the first 25 of {len(events):,}. The full sequence is "
+                f"on the Timeline screen.", size=11, color=P["text3"], lh=1.4))
+        self._derived_events(e)
+
+    def _derived_events(self, e):
+        """The events this artifact produced, shown with the artifact itself.
+
+        This is the drill-down link between an artifact and the timeline: the
+        examiner sees what this specific file contributed to the case without
+        leaving the evidence screen. Events carry their originating artifact
+        id through the pipeline, so the filter is exact rather than guessed.
+        """
+        case = getattr(self, "_case_ref", None) or {}
+        events = [ev for ev in case.get("events", [])
+                  if ev.get("artifact") == e.get("id")]
+        if not events:
+            return
+
+        self._body.addWidget(w.spacer(h=10))
+        self._body.addWidget(w.micro_label(
+            f"EVENTS FROM THIS ARTIFACT ({len(events):,})"))
+        self._body.addWidget(w.hline(P["line"]))
+
+        significant = [ev for ev in events if ev.get("rel") != "noise"]
+        for ev in (significant or events)[:12]:
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 5, 0, 5)
+            line.setSpacing(10)
+            stamp = w.label(str(ev.get("ts", "")), size=10.5, mono=True,
+                            color=P["text3"])
+            stamp.setFixedWidth(130)
+            line.addWidget(stamp)
+            line.addWidget(w.body(str(ev.get("label", "")), size=11.5,
+                                  weight=theme.W_REGULAR, lh=1.3), 1)
+            self._body.addLayout(line)
+            self._body.addWidget(w.hline())
+
+        shown = min(len(significant or events), 12)
+        if len(events) > shown:
+            self._body.addWidget(w.body(
+                f"Showing {shown} of {len(events):,}. Open the Timeline to see "
+                f"all events from this artifact in sequence.",
+                size=11, color=P["text3"], lh=1.4))
 
     # ── tier 2 · rendered ─────────────────────────────────────────────────────
 
     def _tier2(self, e):
-        kind = e.get("kind")
-        if kind == "browser":
-            self._browser_table()
-        elif kind == "registry":
-            self._registry_tree()
-        else:
-            self._tier2_empty()
+        """Rendered view: real parsed records from the actual artifact.
 
-    def _browser_table(self):
+        The old fixture tables are gone. Records come from the parser that
+        matches the artifact's kind; a kind with no parser shows an honest
+        message rather than borrowed sample rows.
+        """
+        from ..artifact_viewer import rendered_records
+        result = rendered_records(e.get("_path", ""), e.get("kind", ""))
+
+        if not result["supported"] or not result["columns"]:
+            self._tier2_message(result["note"] or result.get("error", ""))
+            return
+
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 6)
         head.setSpacing(12)
-        for text, width in (("TIME", 110), ("VISITED / SEARCHED", 0), ("MEANING", 90)):
-            lb = w.micro_label(text)
-            if width:
-                lb.setFixedWidth(width)
-            head.addWidget(lb, 0 if width else 1)
+        for text in result["columns"]:
+            head.addWidget(w.micro_label(text.upper()), 1)
         self._body.addLayout(head)
         self._body.addWidget(w.hline(P["line"]))
 
-        for t, q, tag, warn in HISTORY_ROWS:
+        # Cap realized rows so a large capture can't stall the panel.
+        for record in result["rows"][:150]:
             row = QHBoxLayout()
-            row.setContentsMargins(0, 7, 0, 7)
+            row.setContentsMargins(0, 6, 0, 6)
             row.setSpacing(12)
-            ts = w.label(t, size=10.5, mono=True, color=P["text3"])
-            ts.setFixedWidth(110)
-            row.addWidget(ts)
-            row.addWidget(w.body(q, size=12.5, weight=theme.W_REGULAR, lh=1.3), 1)
-            chip = w.Tag(tag, P["sevCritical"] if warn else P["accent"])
-            chip.setFixedWidth(90)
-            row.addWidget(chip)
+            for cell in record:
+                row.addWidget(
+                    w.body(str(cell), size=11.5, weight=theme.W_REGULAR, lh=1.3), 1)
             self._body.addLayout(row)
             self._body.addWidget(w.hline())
 
-        self._body.addWidget(w.spacer(h=2))
-        self._body.addWidget(w.body(HISTORY_CAPTION, size=11, color=P["text3"], lh=1.4))
+        caption = result["note"]
+        if len(result["rows"]) > 150:
+            caption += f" · showing first 150 of {len(result['rows'])}"
+        if caption:
+            self._body.addWidget(w.spacer(h=2))
+            self._body.addWidget(w.body(caption, size=11, color=P["text3"], lh=1.4))
 
-    def _registry_tree(self):
-        box = QFrame()
-        box.setObjectName("cardAlt")
-        v = QVBoxLayout(box)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(3)
-        for text, pad, hot in REGISTRY_ROWS:
-            lb = w.label(text, size=11, mono=True,
-                         color=P["sevCritical"] if hot else P["text2"],
-                         weight=theme.W_SEMIBOLD if hot else theme.W_REGULAR)
-            lb.setContentsMargins(pad * 18, 0, 0, 0)
-            v.addWidget(lb)
-        self._body.addWidget(box)
-        self._body.addWidget(w.body(
-            "Parsed from the hive file — the registry is read as data, never loaded "
-            "into this machine's own registry.",
-            size=11, color=P["text3"], lh=1.4))
-
-    def _tier2_empty(self):
+    def _tier2_message(self, message):
         box = QFrame()
         box.setObjectName("dashed")
         v = QVBoxLayout(box)
         v.setContentsMargins(20, 34, 20, 34)
         v.setSpacing(6)
-        t = w.label("Nothing to render at this level", size=13,
+        t = w.label("No rendered view for this artifact", size=13,
                     weight=theme.W_MEDIUM, color=P["text2"])
         t.setAlignment(Qt.AlignCenter)
         v.addWidget(t)
-        msg = w.body(
-            "A disk image has no single record set to render. Use "
-            "<b>Browse the files</b> to walk its folders, or <b>Raw preview</b> to "
-            "read bytes.",
-            size=12, color=P["text3"], lh=1.45, rich=True)
+        msg = w.body(message or "Use Raw preview to inspect the bytes directly.",
+                     size=12, color=P["text3"], lh=1.45)
         msg.setAlignment(Qt.AlignCenter)
-        msg.setMaximumWidth(360)
+        msg.setMaximumWidth(380)
         v.addWidget(msg, 0, Qt.AlignCenter)
         self._body.addWidget(box)
 
     # ── tier 3 · browse ───────────────────────────────────────────────────────
 
     def _tier3(self, e):
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(14)
+        """Browse the files: the real filesystem walked from a disk image.
+
+        For non-disk artifacts this tier is honestly disabled with the reason.
+        Deleted/recovered entries are marked.
+        """
+        from ..artifact_viewer import file_tree
+        result = file_tree(e.get("_path", ""), e.get("kind", ""))
+
+        if not result["supported"]:
+            self._tier2_message(result["note"])
+            return
+        if result.get("error"):
+            self._tier2_message(result["error"])
+            return
+
+        entries = result["entries"]
+        if not entries:
+            self._tier2_message("The image parsed but no files were listed at "
+                                "the volume root.")
+            return
 
         tree = QFrame()
         tree.setObjectName("cardAlt")
-        tree.setFixedWidth(320)
         tv = QVBoxLayout(tree)
         tv.setContentsMargins(12, 12, 12, 12)
-        tv.setSpacing(4)
-        for text, pad, deleted, tag in TREE_ROWS:
+        tv.setSpacing(3)
+
+        for entry in entries[:400]:
             line = QWidget()
             lh = QHBoxLayout(line)
-            # 12px per level, not 16: at depth 4 a filename plus its
-            # DELETED/CARVED tag no longer fits the 320px tree column.
-            lh.setContentsMargins(pad * 12, 0, 0, 0)
+            lh.setContentsMargins(0, 0, 0, 0)
             lh.setSpacing(6)
-            lh.addWidget(w.label(text, size=11, mono=True,
-                                 color=P["sevCritical"] if deleted else P["text2"]))
-            if tag:
-                lh.addWidget(w.Tag(tag, P["sevCritical"]))
+            icon = "[D] " if entry["is_dir"] else "    "
+            color = P["sevCritical"] if entry["deleted"] else P["text2"]
+            lh.addWidget(w.label(f"{icon}{entry['name']}", size=11, mono=True,
+                                 color=color))
+            if entry["deleted"]:
+                lh.addWidget(w.Tag("DELETED", P["sevCritical"]))
             lh.addStretch(1)
             tv.addWidget(line)
         tv.addStretch(1)
-        row.addWidget(tree)
+        self._body.addWidget(tree)
 
-        right = QWidget()
-        rv = QVBoxLayout(right)
-        rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(12)
-
-        notice = QFrame()
-        notice.setObjectName("noticeBad")
-        nv = QVBoxLayout(notice)
-        nv.setContentsMargins(12, 11, 12, 11)
-        nv.addWidget(w.body(ARCHIVE_NOTICE, size=12, color=P["text2"], lh=1.5))
-        rv.addWidget(notice)
-
-        rv.addWidget(w.micro_label("INSIDE THE ARCHIVE (31 FILES)"))
-        rv.addWidget(w.hline(P["line"]))
-        for name, size in ARCHIVE_ROWS:
-            line = QHBoxLayout()
-            line.setContentsMargins(0, 6, 0, 6)
-            line.addWidget(w.label(name, size=11.5, mono=True, color=P["text2"]), 1)
-            line.addWidget(w.label(size, size=10.5, mono=True, color=P["text3"]))
-            rv.addLayout(line)
-            rv.addWidget(w.hline())
-        rv.addStretch(1)
-        row.addWidget(right, 1)
-        self._body.addLayout(row)
+        caption = result["note"]
+        if len(entries) > 400:
+            caption += " · showing first 400"
+        self._body.addWidget(w.body(
+            caption + ". Files are read from the image as data; nothing is "
+            "extracted or executed.",
+            size=11, color=P["text3"], lh=1.4))

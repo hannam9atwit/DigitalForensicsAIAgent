@@ -108,13 +108,27 @@ class ChatScreen(Screen):
         self._engine_pill.setText(self._engine_label())
 
     def _engine_label(self):
+        """Live engine status. For local AI this reflects real readiness
+        (ready / model missing / not running) rather than a fixed label, so
+        the examiner can trust what the pill says."""
         config = self.ai_config or {}
         provider = config.get("provider", "ollama")
-        if provider == "ollama":
-            return f"LOCAL MODEL · {config.get('model', 'llama3.2')} · OFFLINE"
         if provider == "none":
             return "RULE-BASED · NO AI"
-        return f"CLOUD · {provider.upper()} · KEY IN MEMORY"
+        if provider != "ollama":
+            key_state = "KEY SET" if config.get("api_key") else "NO KEY"
+            return f"CLOUD · {provider.upper()} · {key_state}"
+
+        from core import ollama_runtime
+        model = config.get("model", "llama3.2:3b")
+        health = ollama_runtime.readiness(model)
+        if health["model_ready"]:
+            return f"LOCAL · {model} · READY"
+        if health["running"]:
+            return f"LOCAL · {model} · MODEL MISSING"
+        if health["installed"]:
+            return "LOCAL · OLLAMA STOPPED"
+        return "LOCAL · NOT INSTALLED"
 
     def _render(self):
         w.clear_layout(self._thread)
@@ -234,14 +248,21 @@ class ChatScreen(Screen):
                 question=text, case=self.case)
 
     def _answer(self, ai_answer, idx):
-        """Prefer the model's answer; fall back to the demo fixtures for
-        suggested questions, and to an honest capability note otherwise."""
+        """Apply the model's answer.
+
+        On a real case, if the model produced nothing we say WHY plainly — we
+        never substitute canned text, because presenting fixed prose as an
+        answer about real evidence is misinformation. The demo case is the one
+        exception: its curated answers exist to show the feature offline, and
+        are gated on the isDemo flag so they can never appear on a real case.
+        """
         if ai_answer and ai_answer.get("paras"):
             answer = ai_answer
-        elif 0 <= idx < len(ANSWERS):
-            answer = ANSWERS[idx]
+        elif self.case.get("caseMeta", {}).get("isDemo"):
+            answer = ANSWERS[idx] if 0 <= idx < len(ANSWERS) else FALLBACK_ANSWER
         else:
-            answer = FALLBACK_ANSWER
+            answer = self._engine_unavailable_answer()
+
         self.msgs.append({
             "user": False, "paras": list(answer["paras"]),
             "uncertain": answer.get("uncertain", ""),
@@ -249,6 +270,38 @@ class ChatScreen(Screen):
         })
         self.thinking = False
         self._render()
+
+    def _engine_unavailable_answer(self) -> dict:
+        """Explain exactly which link in the local-AI chain is missing, so the
+        examiner can fix it, instead of returning a fabricated answer."""
+        from core import ollama_runtime
+        provider = (self.ai_config or {}).get("provider", "ollama")
+
+        if provider in ("anthropic", "openai", "gemini"):
+            para = (f"The {provider} engine is selected but no answer came back. "
+                    f"Check that a valid API key is set in Settings and that this "
+                    f"machine has internet access, then ask again.")
+        else:
+            health = ollama_runtime.readiness(
+                (self.ai_config or {}).get("model", "llama3.2:3b"))
+            if not health["installed"]:
+                para = ("Local AI is not installed, so I can't answer questions "
+                        "about this case yet. Open Settings and run the local AI "
+                        "setup to install Ollama and the model, then ask again.")
+            elif not health["running"]:
+                para = ("Ollama is installed but its service isn't running, so I "
+                        "can't reach the model. Open Settings and run the local AI "
+                        "setup, or start Ollama, then ask again.")
+            elif not health["model_ready"]:
+                para = ("Ollama is running but the language model isn't installed "
+                        "yet. Open Settings and run the local AI setup to download "
+                        "it, then ask again.")
+            else:
+                para = ("The local model is available but did not return an answer "
+                        "for that question. Try rephrasing, or ask about a specific "
+                        "artifact, finding, or time window.")
+
+        return {"paras": [para], "uncertain": "", "chips": []}
 
     def _goto(self, ref):
         if ref == "TL":

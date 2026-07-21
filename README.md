@@ -11,17 +11,10 @@ with optional Anthropic Claude API support. Evidence never leaves the machine.
 
 ## Install (Windows)
 
-Two installers, same app:
-
-| Installer | Size | Best for |
-|---|---|---|
-| **Setup-Full.exe** | ~2.4 GB | Fully offline install — Ollama and the AI model are bundled. Works with no internet, ever. |
-| **Setup-Lite.exe** | ~500 MB | Smaller download — the AI model (~2 GB) downloads automatically on first launch. |
-
-1. Run the installer. No admin rights needed — it installs per-user.
+1. Download and run **`AIRforensics_Setup.exe`**. No admin rights needed — it
+   installs per-user.
 2. Keep **"Install Ollama and set up local AI"** checked (recommended).
-3. Launch the app. Full installs are ready immediately; Lite installs finish
-   the one-time model download on first run.
+3. Launch the app. It finishes the one-time model download (~2 GB) on first run.
 
 Every install starts completely fresh: no cases, no history, no prior data.
 A **Demo Case** is available from `Case ▸ Open Demo Case` to explore the
@@ -62,12 +55,10 @@ python gui_main_native.py
 
 ### Build the installers
 ```bat
-ollama pull llama3.2:3b     &:: once, for the Full variant
 build_windows.bat
 ```
-The script runs PyInstaller, downloads `OllamaSetup.exe`, stages the model
-payload (`tools/prepare_model_payload.py`), and compiles both installers into
-`dist/`.
+The script runs PyInstaller, downloads `OllamaSetup.exe`, and compiles
+`dist/AIRforensics_Setup.exe`.
 
 ### Linux
 `build_linux.sh` produces the AppImage; the in-app setup wizard handles
@@ -77,12 +68,9 @@ Ollama on first launch.
 
 ## Distributing
 
-- **GitHub Releases:** upload `Setup-Lite.exe`. (The Full installer exceeds
-  GitHub's 2 GiB per-file release limit — don't upload it there.)
-- **Website:** host `Setup-Full.exe` as the primary download and link the
-  Lite installer as the "smaller download" alternative. Serve it from object
-  storage or a CDN rather than shared hosting — a 2.4 GB file will saturate a
-  small web server's bandwidth quickly.
+- **GitHub Releases:** upload `AIRforensics_Setup.exe` as the release asset. It stays
+  under GitHub's 2 GiB per-file limit because the language model downloads on
+  first launch rather than being bundled.
 
 ## Project layout
 
@@ -92,7 +80,7 @@ gui_v2/                the application UI (screens, rail, theme, wizard)
 ai/                    narrative + surface engines, format library
 formats/               AI output format specs (edit these, not code)
 core/                  ollama_runtime, SleuthKit tool runners, parsers
-modules/, pipeline/    artifact parsers and the analysis pipeline
-tools/                 build tooling (model payload staging)
-AIRforensics_Setup.iss   Windows installer (Full + Lite variants)
+modules/, pipeline/    artifact parsers (disk, browser, network) and the pipeline
+tools/                 build and maintenance tooling
+AIRforensics_Setup.iss   Windows installer
 ```
