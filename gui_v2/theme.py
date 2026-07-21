@@ -21,6 +21,7 @@ works around them rather than fighting them:
 """
 
 import os
+import sys
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,16 @@ SANS = "Segoe UI"
 MONO = "Consolas"
 
 _loaded = False
+
+
+def assets_path(*parts) -> str:
+    """Absolute path into the bundled assets directory, source or frozen."""
+    if getattr(sys, "frozen", False):
+        root = os.path.join(sys._MEIPASS, "assets")
+    else:
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "assets")
+    return os.path.join(root, *parts)
 
 
 def load_fonts():

@@ -123,14 +123,29 @@ class LaunchScreen(QWidget):
 
 
 class LogoMark(QFrame):
-    """The app mark: a rust rounded square with a white rounded-square outline."""
+    """The AIRforensics logo, scaled smoothly to the requested size.
+
+    Falls back to the original abstract mark (accent rounded square with a
+    white inner square) only if the bundled logo image cannot be loaded."""
 
     def __init__(self, size=52, parent=None):
         super().__init__(parent)
-        self.setObjectName("logoMark")
         self.setFixedSize(size, size)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
+
+        from .. import theme
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QLabel
+        pixmap = QPixmap(theme.assets_path("logo.png"))
+        if not pixmap.isNull():
+            label = QLabel()
+            label.setPixmap(pixmap.scaled(
+                size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            v.addWidget(label, 0, Qt.AlignCenter)
+            return
+
+        self.setObjectName("logoMark")
         inner = QFrame()
         inner.setObjectName("logoInner")
         inner.setFixedSize(20, 20)
