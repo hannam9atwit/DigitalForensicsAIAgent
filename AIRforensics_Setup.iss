@@ -1,9 +1,6 @@
 ; ============================================================================
 ; AIRforensics_Setup.iss — Windows installer (Inno Setup 6)
 ;
-; Product name is TBD: change AppName below (and nothing else) when the final
-; name lands. Everything — folders, shortcuts, uninstall entry — follows it.
-;
 ; Two variants build from this one script:
 ;   FULL (default)         — bundles OllamaSetup.exe AND the model blobs.
 ;                            ~2.4 GB, installs fully offline. Host on the
@@ -33,7 +30,7 @@
 ; ============================================================================
 
 #define AppName      "AIRforensics"
-#define AppVersion   "1.0.0"
+#define AppVersion   "1.1.0"
 #define AppPublisher "AOX LLC"
 #define AppExeName   "AIRforensics.exe"
 #define AppId        "AIRforensics"

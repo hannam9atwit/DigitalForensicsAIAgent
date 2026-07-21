@@ -42,6 +42,8 @@ def main():
     app.setApplicationName("AIRforensics")
 
     from gui_v2 import theme
+    from PySide6.QtGui import QIcon
+    app.setWindowIcon(QIcon(theme.assets_path("app.ico")))
     sans, mono = theme.load_fonts()
     if sans != "Lexend" or mono != "IBM Plex Mono":
         print(f"[~] bundled fonts unavailable — using {sans} / {mono}. "
