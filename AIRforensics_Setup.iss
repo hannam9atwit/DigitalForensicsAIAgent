@@ -92,6 +92,22 @@ Filename: "{tmp}\OllamaSetup.exe"; \
     StatusMsg: "Installing Ollama (local AI runtime)..."; \
     Tasks: installollama; Flags: waituntilterminated
 
+; Ollama's installer launches its tray app when it finishes, which pops a
+; window in the middle of OUR install. Close it; the app starts the Ollama
+; server itself whenever it needs one. (Ollama still auto-starts at login,
+; which is its normal behavior and keeps the server warm.)
+Filename: "{sys}\taskkill.exe"; \
+    Parameters: "/f /im ""ollama app.exe"""; \
+    Tasks: installollama; Flags: runhidden waituntilterminated skipifsilent
+
+; Ollama's installer force-launches its own tray/chat app when it finishes
+; and offers no flag to prevent it. Close it so the install stays seamless;
+; AIRforensics starts the Ollama server itself whenever it needs one.
+Filename: "{cmd}"; \
+    Parameters: "/c timeout /t 3 /nobreak >nul & taskkill /f /im ""ollama app.exe"" >nul 2>&1"; \
+    StatusMsg: "Finishing local AI setup..."; \
+    Tasks: installollama; Flags: runhidden waituntilterminated
+
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; \
     Flags: nowait postinstall skipifsilent
 
