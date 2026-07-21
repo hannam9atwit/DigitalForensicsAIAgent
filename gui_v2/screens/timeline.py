@@ -115,6 +115,7 @@ class TimelineScreen(Screen):
         self.noise = False
         self.query = ""
         self.sel = None
+        self._page_limit = self.PAGE_SIZE
         self.rows = {}
         self._build()
 
@@ -181,6 +182,19 @@ class TimelineScreen(Screen):
 
     # ── filtering ─────────────────────────────────────────────────────────────
 
+    def _show_more_button(self, remaining):
+        from PySide6.QtWidgets import QPushButton
+        step = min(self.PAGE_SIZE, remaining)
+        button = QPushButton(f"Show {step} more  ·  {remaining:,} not shown")
+        button.setObjectName("pill")
+        button.setCursor(QCursor(Qt.PointingHandCursor))
+        button.clicked.connect(self._show_more)
+        return button
+
+    def _show_more(self):
+        self._page_limit += self.PAGE_SIZE
+        self._render()
+
     def _shown(self):
         out = []
         q = self.query.lower()
@@ -194,17 +208,28 @@ class TimelineScreen(Screen):
             out.append(e)
         return out
 
+    # Render at most this many rows at once. Filtering happens over the full
+    # data list (fast); only the realized widgets are capped, which is what
+    # keeps an 11k-event case from building tens of thousands of widgets and
+    # freezing. "Show more" reveals the next page.
+    PAGE_SIZE = 200
+
     def _render(self):
         w.clear_layout(self._tv)
         self.rows.clear()
 
         self._tv.addWidget(self._header())
         shown = self._shown()
-        for e in shown:
+        visible = shown[:self._page_limit]
+        for e in visible:
             row = TimelineRow(e)
             row.clicked.connect(self.select)
             self.rows[e["ts"]] = row
             self._tv.addWidget(row)
+
+        remaining = len(shown) - len(visible)
+        if remaining > 0:
+            self._tv.addWidget(self._show_more_button(remaining))
 
         if not shown:
             empty = w.body("No events match these filters.", size=12.5, color=P["text3"])
@@ -254,6 +279,7 @@ class TimelineScreen(Screen):
 
     def set_source(self, src):
         self.src = src
+        self._page_limit = self.PAGE_SIZE
         for s, b in self._pills.items():
             b.setProperty("on", "true" if s == src else "false")
             b.style().unpolish(b)
@@ -262,10 +288,12 @@ class TimelineScreen(Screen):
 
     def set_noise(self, on):
         self.noise = bool(on)
+        self._page_limit = self.PAGE_SIZE
         self._render()
 
     def set_query(self, text):
         self.query = text or ""
+        self._page_limit = self.PAGE_SIZE
         self._render()
 
     def select(self, ts):

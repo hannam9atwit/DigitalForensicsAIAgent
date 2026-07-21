@@ -54,6 +54,7 @@ a = Analysis(
         "modules.browser.downloads_parser",
         "modules.browser.cookies_parser",
         "modules.timeline.correlation_engine",
+        "modules.network.pcap_parser",
         "pipeline.run_pipeline",
         "gui_v2",
         "gui_v2.main_window",

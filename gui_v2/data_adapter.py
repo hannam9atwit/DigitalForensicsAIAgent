@@ -229,6 +229,7 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
             "fid": fid_by_type.get(e.get("type")),
             "path": (e.get("path") or "")[:160],
             "sev": e.get("sev", 1),
+            "artifact": e.get("artifact"),  # enables per-artifact drill-down
         })
 
     # ── evidence ──────────────────────────────────────────────────────────────

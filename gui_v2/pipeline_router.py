@@ -96,13 +96,23 @@ def _prefetch(path, log):
 def _network(path, log):
     try:
         from modules.network.pcap_parser import PCAPParser
-        r = PCAPParser().parse(path)
-        if r.get("error"):
-            log(f"[!] pcap: {r['error']}")
-        return r.get("events", []), "pcap_parser (dpkt)"
-    except Exception as e:
-        log(f"[!] pcap import/parse failed: {e}")
-        return [], "pcap_parser"
+    except Exception as error:
+        log(f"[!] network parser unavailable: {error}")
+        return [], "pcap_parser", f"parser unavailable: {error}"
+
+    try:
+        result = PCAPParser().parse(path)
+    except Exception as error:
+        log(f"[!] pcap parse failed: {error}")
+        return [], "pcap_parser", f"parse failed: {error}"
+
+    if result.get("error"):
+        log(f"[!] pcap: {result['error']}")
+        return result.get("events", []), "pcap_parser", result["error"]
+
+    packets = result.get("packets", 0)
+    return result.get("events", []), "pcap_parser", (
+        f"{packets} packets read" if packets else "")
 
 
 def _email(path, log):
@@ -131,13 +141,25 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     import time
     t0 = time.time()
     all_events = []
+    parser_status = []  # (artifact_id, name, kind, count, note) for the audit trail
 
     for ev in evidence_list:
         kind = ev.get("kind", "unknown")
         path = ev.get("_path")
         log(f"[*] Parsing {ev['id']} {ev['name']} ({kind})")
         parser = ROUTES.get(kind, _disk)
-        events, parser_name = parser(path, log)
+
+        # Routes may return (events, name) or (events, name, note). The note
+        # carries a human-readable reason when a parser is missing, fails, or
+        # simply finds nothing — so those outcomes reach the audit trail
+        # instead of vanishing into the debug log.
+        result = parser(path, log)
+        note = ""
+        if len(result) == 3:
+            events, parser_name, note = result
+        else:
+            events, parser_name = result
+
         for e in events:
             e["artifact"] = ev["id"]
             e.setdefault("source", _src_for(kind))
@@ -145,6 +167,15 @@ def run_analysis(evidence_list, log=print, ai_config=None):
         ev["parser"] = parser_name
         ev["detail"] = f"{len(events)} events parsed"
         all_events += events
+
+        if not events:
+            reason = note or "no events produced"
+            log(f"[!] {ev['id']} {ev['name']}: {reason}")
+            parser_status.append(
+                (ev["id"], parser_name, kind, 0, reason))
+        else:
+            parser_status.append(
+                (ev["id"], parser_name, kind, len(events), note))
 
     all_events = [e for e in all_events if e.get("timestamp")]
     all_events.sort(key=lambda e: e["timestamp"])
@@ -214,6 +245,7 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     return {
         "events": all_events, "findings": findings, "anomalies": anomalies,
         "narrative": narrative,
+        "parserStatus": parser_status,
         "pipeline": {
             "lastRun": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "duration": f"{int(dur//60)}m {int(dur % 60):02d}s",

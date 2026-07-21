@@ -3,14 +3,12 @@ REM ============================================================
 REM build_windows.bat — Windows build + installer pipeline.
 REM
 REM Produces:
-REM   dist\AIRforensics\                  portable folder
-REM   dist\AIRforensics_Setup-Full.exe    offline installer (~2.4 GB)
-REM   dist\AIRforensics_Setup-Lite.exe    small installer (~500 MB)
+REM   dist\AIRforensics\             portable folder
+REM   dist\AIRforensics_Setup.exe    the installer
 REM
 REM Requirements:
 REM   Python 3.11+, pip install -r requirements.txt
 REM   Inno Setup 6           https://jrsoftware.org/isinfo.php
-REM   Ollama on this machine https://ollama.com  (Full variant only)
 REM ============================================================
 
 setlocal enabledelayedexpansion
@@ -55,16 +53,6 @@ if not exist "redist\OllamaSetup.exe" (
     )
 )
 
-if not exist "redist\ollama-models\manifests" (
-    echo [*] Staging model payload for the Full installer...
-    python tools\prepare_model_payload.py
-    if errorlevel 1 (
-        echo [~] Model payload unavailable -- Full installer will be skipped.
-        echo     Run `ollama pull llama3.2:3b` on this machine, then rebuild.
-        set SKIP_FULL=1
-    )
-)
-
 REM -- Inno Setup ----------------------------------------------
 set ISCC=
 if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
@@ -82,20 +70,14 @@ if not defined ISCC (
 
 REM Parentheses in echo text inside if-blocks break cmd's parser, so the
 REM installer builds use plain goto flow instead of blocks.
-echo [*] Building LITE installer - model downloads on first launch...
-%ISCC% /Q /DLITE AIRforensics_Setup.iss
-if errorlevel 1 echo [!] Lite installer failed.
-
-if defined SKIP_FULL goto done
-echo [*] Building FULL installer - fully offline, large...
+echo [*] Building the installer...
 %ISCC% /Q AIRforensics_Setup.iss
-if errorlevel 1 echo [!] Full installer failed.
+if errorlevel 1 echo [!] Installer build failed.
 
 :done
 echo.
 echo [+] Build pipeline finished.
-echo     Portable : dist\AIRforensics\
-echo     Lite     : dist\AIRforensics_Setup-Lite.exe  (GitHub Releases)
-echo     Full     : dist\AIRforensics_Setup-Full.exe  (website download)
+echo     Portable  : dist\AIRforensics\
+echo     Installer : dist\AIRforensics_Setup.exe
 echo.
 pause

@@ -163,6 +163,22 @@ class CaseBuilder:
         self._log("ANALYSIS_STARTED",
                   f"Full pipeline · {len(self.evidence)} artifacts queued", who="system")
         self.analysis = run_analysis(self.evidence, log=log, ai_config=ai_config)
+
+        # Surface each artifact's parser outcome in the audit trail. A parser
+        # that produced nothing — missing dependency, unsupported format, real
+        # failure — is recorded explicitly so a zero-event artifact is never a
+        # silent mystery.
+        for artifact_id, parser_name, kind, count, note in \
+                self.analysis.get("parserStatus", []):
+            if count == 0:
+                self._log("PARSER_NO_EVENTS",
+                          f"{artifact_id} ({kind}) via {parser_name}: "
+                          f"{note or 'no events produced'}", who="system")
+            elif note:
+                self._log("PARSER_OK",
+                          f"{artifact_id} ({kind}): {count} events · {note}",
+                          who="system")
+
         self._log("ANALYSIS_COMPLETE",
                   f"{len(self.analysis['events'])} events · "
                   f"{len(self.analysis['findings'])} findings", who="system")

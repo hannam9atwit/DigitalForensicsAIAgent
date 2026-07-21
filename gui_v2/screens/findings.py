@@ -24,6 +24,16 @@ from .base import Screen
 P = theme.GUIDED
 
 
+_SEV_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def _severity_rank(finding):
+    sev = finding.get("sev", finding.get("severity", "LOW"))
+    if isinstance(sev, int):
+        return sev
+    return _SEV_ORDER.get(str(sev).upper(), 0)
+
+
 class FindingsScreen(Screen):
     id = "findings"
 
@@ -41,7 +51,15 @@ class FindingsScreen(Screen):
         host, lay = w.page(max_width=760)
         root.addWidget(w.scroll_area(host))
 
-        findings = self.case.get("findings", [])
+        all_findings = self.case.get("findings", [])
+        # Cap realized cards: a large automated run can yield thousands of
+        # findings, and one widget per finding freezes the screen. The most
+        # severe render first; the rest are reachable via "show more".
+        self._render_cap = 150
+        findings = sorted(
+            all_findings,
+            key=lambda f: -_severity_rank(f))[:self._render_cap]
+        self._overflow = len(all_findings) - len(findings)
         has_phases = bool(self.case.get("phases"))
         lay.addWidget(w.screen_title("What the evidence shows"))
         lay.addWidget(w.body(
@@ -80,6 +98,15 @@ class FindingsScreen(Screen):
                 card = self._card(f)
                 self.cards[f["id"]] = card
                 lay.addWidget(card)
+
+        if self._overflow > 0:
+            note = w.body(
+                f"Showing the {len(findings)} most severe of "
+                f"{len(all_findings):,} findings. Refine the case or use the "
+                f"timeline to reach the rest.",
+                size=12, color=P["text3"])
+            note.setContentsMargins(0, 12, 0, 0)
+            lay.addWidget(note)
 
         lay.addStretch(1)
         self.select(findings[0]["id"])
