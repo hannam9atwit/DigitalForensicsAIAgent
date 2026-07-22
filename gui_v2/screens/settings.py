@@ -85,6 +85,19 @@ class SettingsScreen(Screen):
         ai.add(w.spacer(h=6))
         ai.add(setup_button)
 
+        # One-click re-detect: starts the server if it's asleep and re-probes
+        # models, then updates the status line. This is the honest fix for
+        # "it didn't detect Ollama" — no reinstall needed.
+        recheck = QPushButton("Re-check / reconnect")
+        recheck.clicked.connect(self._recheck_ai)
+        ai.add(w.spacer(h=4))
+        ai.add(recheck)
+
+        self._ai_detail = w.body(self._status_detail(), size=11,
+                                 color=P["text3"], lh=1.5)
+        ai.add(w.spacer(h=4))
+        ai.add(self._ai_detail)
+
         ai.add(w.spacer(h=4))
         ai.add(w.hline())
         ai.add(w.kv_row("Fallback order",
@@ -113,6 +126,45 @@ class SettingsScreen(Screen):
         e.textChanged.connect(self._emit)
         card.add(e)
         return e
+
+    def _status_detail(self):
+        """A sentence naming the exact local-AI state and its next action."""
+        health = ollama_runtime.readiness(
+            self.settings.get("ollama_model", "llama3.2:3b"))
+        if health["model_loaded"]:
+            return "Local AI is running and the model is loaded and ready."
+        if health["model_ready"]:
+            return ("Local AI is running; the model is installed and will load "
+                    "on first use.")
+        if health["running"]:
+            return ("Ollama is running but the model isn't downloaded yet. Use "
+                    "Run local AI setup to download it.")
+        if health["installed"]:
+            return ("Ollama is installed but its server isn't running. Use "
+                    "Re-check to start it.")
+        return ("Ollama isn't installed. Use Run local AI setup to install it, "
+                "or keep using rule-based mode.")
+
+    def _recheck_ai(self):
+        """Start the server if needed and re-probe, off the UI thread so the
+        button never freezes the screen."""
+        import threading
+        self._ai_detail.setText("Re-checking local AI…")
+
+        def probe():
+            ollama_runtime.ensure_ready(
+                self.settings.get("ollama_model", "llama3.2:3b"))
+
+        def done():
+            self._ai_detail.setText(self._status_detail())
+
+        def run():
+            probe()
+            # Hop back to the UI thread to update the label.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, done)
+
+        threading.Thread(target=run, daemon=True, name="ai-recheck").start()
 
     def _status_label(self):
         """Live local-AI status, evaluated once when the screen builds."""

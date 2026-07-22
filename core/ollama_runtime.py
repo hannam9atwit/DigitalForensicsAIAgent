@@ -160,16 +160,67 @@ def pull_model(model: str = DEFAULT_MODEL, on_progress=None) -> bool:
     return model_available(model)
 
 
+def model_loaded(model: str = DEFAULT_MODEL) -> bool:
+    """True if the model is loaded in memory right now (not just on disk).
+
+    Ollama reports running models at /api/ps. A model present on disk but not
+    loaded still costs a multi-second load on the first real request, so the
+    GUI distinguishes "present" from "warm".
+    """
+    try:
+        request = urllib.request.Request(f"{OLLAMA_HOST}/api/ps", method="GET")
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_S) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    base = model.split(":")[0]
+    return any(base == m.get("name", "").split(":")[0]
+               for m in body.get("models", []))
+
+
+def warm_model(model: str = DEFAULT_MODEL) -> bool:
+    """Load the model into memory with one tiny request, so the user's first
+    real question doesn't eat the load time.
+
+    Warming only loads a model that is already present; it never downloads
+    (that needs consent). keep_alive asks Ollama to hold the model resident.
+    Returns True if the model is warm afterward.
+    """
+    if not server_running() or not model_available(model):
+        return False
+    payload = json.dumps({
+        "model": model,
+        "prompt": "ok",
+        "stream": False,
+        "keep_alive": "30m",
+        "options": {"num_predict": 1},
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"{OLLAMA_HOST}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120):
+            return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
 def readiness(model: str = DEFAULT_MODEL) -> dict:
     """One-call health summary the GUI can render directly.
 
-    Returns {"installed", "running", "model_ready"} — each a bool, evaluated
-    in dependency order (a stopped server can't report models).
+    Returns {"installed", "running", "model_ready", "model_loaded"} — each a
+    bool, evaluated in dependency order (a stopped server can't report
+    models). model_loaded distinguishes a warm model from one merely present.
     """
     installed = is_installed()
     running = server_running()
     ready = model_available(model) if running else False
-    return {"installed": installed, "running": running, "model_ready": ready}
+    loaded = model_loaded(model) if ready else False
+    return {"installed": installed, "running": running,
+            "model_ready": ready, "model_loaded": loaded}
 
 
 def ensure_ready(model: str = DEFAULT_MODEL) -> dict:

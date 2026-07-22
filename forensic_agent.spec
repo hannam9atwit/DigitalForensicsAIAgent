@@ -60,6 +60,8 @@ a = Analysis(
         "gui_v2.main_window",
         "gui_v2.setup_wizard",
         "gui_v2.ai_worker",
+        "gui_v2.viewer_worker",
+        "gui_v2.startup",
         "gui_v2.app_settings",
         "gui_v2.case_store",
         "gui_v2.case_model",
