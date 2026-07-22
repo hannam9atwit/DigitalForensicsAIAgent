@@ -58,12 +58,24 @@ class ToolRunner:
                 cmd = [cmd[0], "-i", "ewf"] + cmd[1:]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
+            # On Windows, suppress the console window that subprocess.run pops
+            # for each SleuthKit call (the "terminal flashes then closes" the
+            # user sees), and cap the call so a bad image can't hang the UI.
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = subprocess.CREATE_NO_WINDOW
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, shell=False,
+                timeout=120, creationflags=creation_flags)
             return {
                 "stdout":     result.stdout,
                 "stderr":     result.stderr,
                 "returncode": result.returncode,
             }
+        except subprocess.TimeoutExpired:
+            return {"stdout": "", "stderr": "tool timed out after 120s",
+                    "returncode": -1}
         except Exception as e:
             return {"stdout": "", "stderr": str(e), "returncode": -1}
 

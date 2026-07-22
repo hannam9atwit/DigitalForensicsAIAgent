@@ -90,13 +90,15 @@ class SettingsScreen(Screen):
         # "it didn't detect Ollama" — no reinstall needed.
         recheck = QPushButton("Re-check / reconnect")
         recheck.clicked.connect(self._recheck_ai)
+        self._recheck_button = recheck
         ai.add(w.spacer(h=4))
         ai.add(recheck)
 
-        self._ai_detail = w.body(self._status_detail(), size=11,
+        self._ai_detail = w.body("Checking local AI…", size=11,
                                  color=P["text3"], lh=1.5)
         ai.add(w.spacer(h=4))
         ai.add(self._ai_detail)
+        self._refresh_ai_detail_async()
 
         ai.add(w.spacer(h=4))
         ai.add(w.hline())
@@ -127,10 +129,30 @@ class SettingsScreen(Screen):
         card.add(e)
         return e
 
-    def _status_detail(self):
-        """A sentence naming the exact local-AI state and its next action."""
-        health = ollama_runtime.readiness(
-            self.settings.get("ollama_model", "llama3.2:3b"))
+    def _refresh_ai_detail_async(self):
+        """Probe readiness off-thread and update the detail line, so building
+        the Settings screen never blocks on Ollama network calls."""
+        from PySide6.QtCore import QObject, QThread, Signal
+        model = self.settings.get("ollama_model", "llama3.2:3b")
+        detail_fn = self._detail_for_health
+
+        class _DetailProbe(QObject):
+            ready = Signal(str)
+
+            def run(self):
+                health = ollama_runtime.readiness(model)
+                self.ready.emit(detail_fn(health))
+
+        self._detail_thread = QThread()
+        self._detail_probe = _DetailProbe()
+        self._detail_probe.moveToThread(self._detail_thread)
+        self._detail_thread.started.connect(self._detail_probe.run)
+        self._detail_probe.ready.connect(self._ai_detail.setText)
+        self._detail_probe.ready.connect(self._detail_thread.quit)
+        self._detail_thread.finished.connect(self._detail_thread.deleteLater)
+        self._detail_thread.start()
+
+    def _detail_for_health(self, health):
         if health["model_loaded"]:
             return "Local AI is running and the model is loaded and ready."
         if health["model_ready"]:
@@ -145,26 +167,80 @@ class SettingsScreen(Screen):
         return ("Ollama isn't installed. Use Run local AI setup to install it, "
                 "or keep using rule-based mode.")
 
+    def _status_detail(self):
+        """A sentence naming the exact local-AI state and its next action."""
+        health = ollama_runtime.readiness(
+            self.settings.get("ollama_model", "llama3.2:3b"))
+        return self._detail_for_health(health)
+
     def _recheck_ai(self):
-        """Start the server if needed and re-probe, off the UI thread so the
-        button never freezes the screen."""
-        import threading
+        """Start the server if needed and re-probe, off the UI thread.
+
+        Uses a QObject + signal to deliver the result back to the UI thread.
+        A cross-thread QTimer.singleShot does NOT reliably fire (a QTimer
+        belongs to the thread that creates it), which previously left the
+        status stuck on "Re-checking…" forever.
+        """
+        from PySide6.QtCore import QObject, QThread, Signal
+
         self._ai_detail.setText("Re-checking local AI…")
+        self._recheck_btn_disable()
 
-        def probe():
-            ollama_runtime.ensure_ready(
-                self.settings.get("ollama_model", "llama3.2:3b"))
+        model = self.settings.get("ollama_model", "llama3.2:3b")
 
-        def done():
+        class _Probe(QObject):
+            done = Signal(str)
+
+            def run(self):
+                # A hard wall-clock cap: whatever any single network call does,
+                # re-check reports back within this window instead of leaving
+                # the status stuck on "Checking…". The probe runs in its own
+                # thread with a watchdog that reports a timeout result.
+                import threading
+
+                result = {"finished": False}
+
+                def probe():
+                    try:
+                        ollama_runtime.ensure_ready(model)
+                    except Exception:
+                        pass
+                    result["finished"] = True
+
+                worker = threading.Thread(target=probe, daemon=True)
+                worker.start()
+                worker.join(timeout=45)
+                if not result["finished"]:
+                    self.done.emit("timeout")
+                else:
+                    self.done.emit("")
+
+        self._recheck_thread = QThread()
+        self._recheck_probe = _Probe()
+        self._recheck_probe.moveToThread(self._recheck_thread)
+        self._recheck_thread.started.connect(self._recheck_probe.run)
+        self._recheck_probe.done.connect(self._recheck_finished)
+        self._recheck_probe.done.connect(self._recheck_thread.quit)
+        self._recheck_thread.finished.connect(self._recheck_thread.deleteLater)
+        self._recheck_thread.start()
+
+    def _recheck_btn_disable(self):
+        if hasattr(self, "_recheck_button"):
+            self._recheck_button.setEnabled(False)
+            self._recheck_button.setText("Checking…")
+
+    def _recheck_finished(self, status):
+        # Back on the UI thread (queued signal): update the status line.
+        if status == "timeout":
+            self._ai_detail.setText(
+                "Re-check timed out. Ollama may be busy or unresponsive. Make "
+                "sure Ollama is running (open it from the Start Menu), then try "
+                "again.")
+        else:
             self._ai_detail.setText(self._status_detail())
-
-        def run():
-            probe()
-            # Hop back to the UI thread to update the label.
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, done)
-
-        threading.Thread(target=run, daemon=True, name="ai-recheck").start()
+        if hasattr(self, "_recheck_button"):
+            self._recheck_button.setEnabled(True)
+            self._recheck_button.setText("Re-check / reconnect")
 
     def _status_label(self):
         """Live local-AI status, evaluated once when the screen builds."""

@@ -249,22 +249,14 @@ def file_tree(path: str, kind: str, log=lambda _m: None) -> dict:
     try:
         from core.tool_runner import ToolRunner
         runner = ToolRunner()
-        # fls at the volume root: real filesystem listing from the image.
-        result = runner.run_tsk(["fls", "-r", "-p", path], image_path=path)
+        entries, error = _run_fls(runner, path)
     except Exception as error:
         return {"entries": [], "supported": True, "note": "",
                 "error": f"couldn't read the image's filesystem: {error}"}
 
-    if result.get("returncode", -1) != 0:
-        stderr = (result.get("stderr") or "").strip()
-        hint = ""
-        if "not found" in stderr.lower():
-            hint = (" SleuthKit binaries are needed to browse disk images; "
-                    "they ship with the installer.")
-        return {"entries": [], "supported": True, "note": "",
-                "error": f"fls could not read this image: {stderr}{hint}"}
+    if error:
+        return {"entries": [], "supported": True, "note": "", "error": error}
 
-    entries = _parse_fls(result.get("stdout", ""))
     deleted = sum(1 for entry in entries if entry["deleted"])
     note = f"{len(entries)} entries"
     if deleted:
@@ -272,6 +264,66 @@ def file_tree(path: str, kind: str, log=lambda _m: None) -> dict:
     if len(entries) == _FLS_ENTRY_CAP:
         note += f" (showing first {_FLS_ENTRY_CAP})"
     return {"entries": entries, "supported": True, "note": note, "error": ""}
+
+
+def _run_fls(runner, path):
+    """Run fls, handling both single-volume images and full disk images.
+
+    A full disk image has a partition table, so fls must be told the
+    filesystem's byte offset with -o; run against the whole image it fails with
+    "Cannot determine file system type". So: try the image directly first
+    (works for single-volume/partition images), and if that fails, use mmls to
+    find partitions and retry fls at each filesystem partition's offset.
+
+    Returns (entries, error_message).
+    """
+    # Attempt 1: image is a single filesystem (no partition table).
+    result = runner.run_tsk(["fls", "-r", "-p", path], image_path=path)
+    if result.get("returncode") == 0 and result.get("stdout", "").strip():
+        return _parse_fls(result["stdout"]), ""
+
+    direct_stderr = (result.get("stderr") or "").strip()
+
+    # Attempt 2: full disk image — locate partitions with mmls, then fls -o.
+    mmls = runner.run_tsk(["mmls", path], image_path=path)
+    if mmls.get("returncode") == 0:
+        offsets = _parse_mmls_offsets(mmls.get("stdout", ""))
+        for offset in offsets:
+            part = runner.run_tsk(
+                ["fls", "-r", "-p", "-o", str(offset), path], image_path=path)
+            if part.get("returncode") == 0 and part.get("stdout", "").strip():
+                return _parse_fls(part["stdout"]), ""
+
+    # Both paths failed — report the most useful reason.
+    stderr = direct_stderr or (mmls.get("stderr") or "").strip()
+    hint = ""
+    if "not found" in stderr.lower() or "tool not found" in stderr.lower():
+        hint = (" SleuthKit binaries are needed to browse disk images; they "
+                "ship with the installer in bin/sleuthkit.")
+    elif "cannot determine" in stderr.lower() or not stderr:
+        hint = (" The image may be encrypted, use an unsupported filesystem, or "
+                "be a container format this build doesn't mount.")
+    return [], f"fls could not read this image: {stderr or 'no filesystem found'}{hint}"
+
+
+def _parse_mmls_offsets(output):
+    """Extract filesystem partition start sectors from mmls output, as byte
+    offsets (mmls reports 512-byte sectors)."""
+    offsets = []
+    for line in output.splitlines():
+        parts = line.split()
+        # mmls rows: NN:  meta/---  <start>  <end>  <length>  <description>
+        if len(parts) >= 6 and parts[0].rstrip(":").isdigit():
+            descriptor = " ".join(parts[5:]).lower()
+            if any(skip in descriptor for skip in
+                   ("unallocated", "meta", "primary table", "extended")):
+                continue
+            try:
+                start_sector = int(parts[2])
+            except ValueError:
+                continue
+            offsets.append(start_sector * 512)
+    return offsets
 
 
 _FLS_ENTRY_CAP = 1000
