@@ -20,21 +20,30 @@ class ToolRunner:
         else:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-        self.tsk_path = os.path.join(base, "bin", "sleuthkit")
+        # Search several plausible locations: bundled data lands under _MEIPASS
+        # in onedir mode, but the exe may run from one directory up, and a
+        # system SleuthKit install is a valid fallback.
+        self._search_dirs = [
+            os.path.join(base, "bin", "sleuthkit"),
+            os.path.join(os.path.dirname(sys.executable), "bin", "sleuthkit")
+            if getattr(sys, "frozen", False) else "",
+            os.path.join(base, "_internal", "bin", "sleuthkit"),
+        ]
+        self._search_dirs = [d for d in self._search_dirs if d]
+        self.tsk_path = self._search_dirs[0]
 
     def _resolve(self, tool_name: str):
-        for candidate in [
-            os.path.join(self.tsk_path, tool_name + ".exe"),
-            os.path.join(self.tsk_path, tool_name),
-        ]:
-            if os.path.exists(candidate):
-                return candidate
+        for directory in self._search_dirs:
+            for candidate in (os.path.join(directory, tool_name + ".exe"),
+                              os.path.join(directory, tool_name)):
+                if os.path.exists(candidate):
+                    return candidate
 
-        # Last resort: check system PATH
+        # Last resort: a SleuthKit install on the system PATH.
         found = shutil.which(tool_name)
         if not found:
             print(f"[!] Could not resolve tool: {tool_name}")
-            print(f"    Looked in: {self.tsk_path}")
+            print(f"    Looked in: {', '.join(self._search_dirs)}")
         return found
 
     def run_tsk(self, cmd_list: list, image_path: str = None) -> dict:

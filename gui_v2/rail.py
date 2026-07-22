@@ -43,9 +43,11 @@ class RailPayload:
 
 
 class ExplainerRail(QFrame):
-    """Right-hand rail. Emits chip_clicked(ref) when a chip is pressed."""
+    """Right-hand rail. Emits chip_clicked(ref) when a chip is pressed, and
+    ask_submitted(question) when the user uses the inline mini-chat."""
 
     chip_clicked = Signal(str)
+    ask_submitted = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -106,7 +108,53 @@ class ExplainerRail(QFrame):
         if payload.chips:
             self._body.addWidget(self._chip_row(payload.chip_head, payload.chips))
 
+        self._body.addWidget(self._mini_chat())
         self._body.addStretch(1)
+
+    def _mini_chat(self):
+        """A compact 'ask the model about this' box, present on every screen
+        that shows the rail. Answers appear inline; the heavy lifting is the
+        same async ask path the full chat screen uses."""
+        from PySide6.QtWidgets import QLineEdit, QPushButton
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 8, 0, 0)
+        v.setSpacing(6)
+        v.addWidget(w.micro_label("ASK ABOUT THIS", color=P["accent"]))
+
+        self._mini_answer = w.body("", size=12, color=P["text2"], lh=1.5)
+        self._mini_answer.setVisible(False)
+        v.addWidget(self._mini_answer)
+
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        self._mini_input = QLineEdit()
+        self._mini_input.setPlaceholderText("Ask the model…")
+        self._mini_input.returnPressed.connect(self._mini_send)
+        h.addWidget(self._mini_input, 1)
+        send = QPushButton("Ask")
+        send.setObjectName("primary")
+        send.clicked.connect(self._mini_send)
+        h.addWidget(send)
+        v.addWidget(row)
+        return box
+
+    def _mini_send(self):
+        question = self._mini_input.text().strip()
+        if not question:
+            return
+        self._mini_input.clear()
+        self._mini_answer.setVisible(True)
+        self._mini_answer.setText("Thinking…")
+        self.ask_submitted.emit(question)
+
+    def show_mini_answer(self, text: str):
+        """Called by the window when the async answer returns."""
+        if hasattr(self, "_mini_answer") and self._mini_answer is not None:
+            self._mini_answer.setVisible(True)
+            self._mini_answer.setText(text)
 
     def _block(self, head, text):
         box = QWidget()
