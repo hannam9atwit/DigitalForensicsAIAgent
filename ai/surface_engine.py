@@ -22,6 +22,7 @@ So the UI never blocks and never shows an unformatted or empty surface. The
 spec files in formats/ own the output shape — swap a file, the AI conforms.
 """
 
+import re
 import json
 import urllib.error
 import urllib.request
@@ -95,40 +96,45 @@ class SurfaceEngine:
     def ask(self, question: str, case: dict) -> dict | None:
         """Answer an examiner's question from the case data.
 
-        Returns {"paras", "uncertain", "chips"} ready for the chat bubble, or
-        None when no engine is available / generation failed — the caller
-        decides the fallback (canned demo answer or an honest "no AI" note).
-        Source chips are validated against the case: the model may only cite
-        IDs that actually exist.
+        Returns {"paras", "uncertain", "chips"} for the chat bubble, or None
+        only when no engine is reachable or the model genuinely returns nothing.
+
+        Interactive chat is lenient by design: a small local model will not
+        always hit a strict output format, and rejecting a real, useful answer
+        because it used a dash or an extra sentence is worse than showing it.
+        So instead of validating-and-rejecting, we clean the answer (strip
+        markdown, normalize dashes) and accept any non-empty response. The
+        SOURCES / UNCERTAIN lines are parsed if the model provided them but are
+        not required.
         """
-        spec = format_library.load("ask_answer")
-        if spec is None or not self.available():
+        if not self.available():
             return None
 
+        spec = format_library.load("ask_answer")
+        spec_text = spec.prompt_text if spec else _ASK_FALLBACK_GUIDE
         prompt = (
             f"QUESTION: {question}\n\n"
             f"CASE DATA:\n{self._case_context(case)}"
         )
-        full_prompt = f"{_PERSONA}\n\n{spec.prompt_text}\n\nTASK:\n{prompt}\n\nTEXT:"
+        full_prompt = f"{_PERSONA}\n\n{spec_text}\n\nTASK:\n{prompt}\n\nTEXT:"
 
-        attempt_prompt = full_prompt
-        for _ in range(1 + _RETRY_LIMIT):
-            text = self._call_llm(attempt_prompt)
-            if text is None:
-                return None
-            text = _strip_wrapping(text)
-            violations = spec.validate(text)
-            if not violations:
-                return self._parse_answer(text, case)
-            attempt_prompt = (
-                f"{full_prompt}\n\nYour previous attempt violated the format: "
-                f"{'; '.join(violations)}. Rewrite it correctly. TEXT:")
+        text = self._call_llm(full_prompt)
+        if text is None:
+            return None
+        text = _strip_wrapping(text)
+        if len(text.strip()) < 15:
+            return None  # genuinely empty / broken response
 
-        return None
+        return self._parse_answer(text, case)
 
     def _parse_answer(self, text: str, case: dict) -> dict:
-        """Split the model's answer into paragraphs, the UNCERTAIN note, and
-        validated SOURCES chips."""
+        """Split the model's answer into paragraphs, an optional UNCERTAIN
+        note, and validated SOURCES chips.
+
+        Formatting the model added (markdown bold, bullets, dashes) is cleaned
+        here rather than rejected upstream, so a real answer always reaches the
+        user. SOURCES and UNCERTAIN are honored if present but not required.
+        """
         uncertain = ""
         source_ids = []
         body_lines = []
@@ -137,7 +143,7 @@ class SurfaceEngine:
             stripped = line.strip()
             upper = stripped.upper()
             if upper.startswith("UNCERTAIN:"):
-                uncertain = stripped[len("UNCERTAIN:"):].strip()
+                uncertain = _clean_line(stripped[len("UNCERTAIN:"):].strip())
             elif upper.startswith("SOURCES:"):
                 source_ids = [s.strip().upper()
                               for s in stripped[len("SOURCES:"):].split(",")
@@ -145,8 +151,8 @@ class SurfaceEngine:
             else:
                 body_lines.append(line)
 
-        paras = [p.strip() for p in "\n".join(body_lines).split("\n\n")
-                 if p.strip()]
+        paras = [_clean_line(p.strip())
+                 for p in "\n".join(body_lines).split("\n\n") if p.strip()]
 
         known_evidence = {e.get("id"): e for e in case.get("evidence", [])}
         known_findings = {f.get("id") for f in case.get("findings", [])}
@@ -329,3 +335,25 @@ def _strip_wrapping(text: str) -> str:
         if cleaned.upper().startswith(label):
             cleaned = cleaned[len(label):].strip()
     return cleaned
+
+
+_ASK_FALLBACK_GUIDE = (
+    "Answer the examiner's question using only the case data provided, in one "
+    "to three short plain-language paragraphs. If the data can't answer it, say "
+    "so and name what evidence would. You may end with a line 'SOURCES: <ids>' "
+    "listing the artifact or finding IDs your answer used."
+)
+
+_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_MD_BULLET = re.compile(r"^\s*[-*•]\s+", re.MULTILINE)
+
+
+def _clean_line(text: str) -> str:
+    """Normalize model formatting for display: unwrap bold, drop bullet marks,
+    replace dashes with plain punctuation. Keeps the words, loses the markup —
+    so a well-meaning but markdown-happy local model still reads cleanly."""
+    cleaned = _MD_BOLD.sub(r"\1", text)
+    cleaned = _MD_BULLET.sub("", cleaned)
+    cleaned = cleaned.replace(" — ", ", ").replace("—", ", ")
+    cleaned = cleaned.replace("`", "").replace("#", "")
+    return cleaned.strip()

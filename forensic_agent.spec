@@ -13,10 +13,14 @@ block_cipher = None
 
 pyside6_hidden = collect_submodules("PySide6")
 
-# Collect all .exe and .dll files from bin/sleuthkit as binaries
-# so PyInstaller copies them as executables, not data blobs.
+# Bundle the whole bin/sleuthkit folder verbatim as data, preserving the
+# exact layout. SleuthKit's fls.exe/mmls.exe depend on sibling DLLs
+# (libtsk, zlib, libewf, ...) that must sit next to them; routing them through
+# PyInstaller's binary dependency analysis (binaries=) can relocate or split
+# them so the tools fail to launch ("fls cannot read this"). Copying the
+# folder as-is keeps each .exe with its DLLs.
 import glob
-sleuthkit_binaries = [
+sleuthkit_datas = [
     (f, "bin/sleuthkit")
     for f in glob.glob("bin/sleuthkit/*")
     if os.path.isfile(f)
@@ -25,10 +29,11 @@ sleuthkit_binaries = [
 a = Analysis(
     ["gui_main_native.py"],
     pathex=["."],
-    binaries=sleuthkit_binaries,
+    binaries=[],
     datas=[
         ("assets", "assets"),
         ("formats", "formats"),
+        *sleuthkit_datas,
     ],
     hiddenimports=[
         *pyside6_hidden,

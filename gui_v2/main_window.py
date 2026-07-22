@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
 
         self.rail = ExplainerRail()
         self.rail.chip_clicked.connect(self._resolve_ref)
+        self.rail.ask_submitted.connect(self._rail_ask)
         root.addWidget(self.rail)
 
         self.setStatusBar(QStatusBar())
@@ -318,6 +319,38 @@ class MainWindow(QMainWindow):
         self.sidebar.set_active(sid)
         self._current = sid
         self.screens[sid].on_show(arg)
+
+    def _rail_ask(self, question):
+        """Answer a rail mini-chat question with the same async engine the
+        full chat screen uses, so any page can query the model in place."""
+        from .ai_worker import SurfaceJob
+        job = SurfaceJob(self._ai_config())
+        job.answer_ready.connect(self._rail_answer_ready)
+        self._rail_ask_job = job
+        job.run("ask", token="rail", fallback="",
+                question=question, case=self.case)
+
+    def _rail_answer_ready(self, _token, answer):
+        if answer and answer.get("paras"):
+            text = "\n\n".join(answer["paras"])
+            if answer.get("uncertain"):
+                text += f"\n\nUncertain: {answer['uncertain']}"
+        else:
+            from core import ollama_runtime
+            health = ollama_runtime.readiness(
+                self._ai_config().get("model", "llama3.2:3b"))
+            if not health["installed"]:
+                text = ("Local AI isn't installed. Set it up in Settings to "
+                        "ask questions.")
+            elif not health["running"]:
+                text = ("Local AI isn't running. Open Settings and re-check to "
+                        "start it.")
+            elif not health["model_ready"]:
+                text = "The model isn't downloaded yet. Set it up in Settings."
+            else:
+                text = ("No answer came back. Try rephrasing, or use the full "
+                        "Ask the AI screen.")
+        self.rail.show_mini_answer(text)
 
     def _resolve_ref(self, ref):
         """Rail chips carry a bare reference; the window knows where it points."""
