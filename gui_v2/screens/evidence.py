@@ -25,6 +25,7 @@ from ..content import (
     TIERS, SEALED_NOTE, EVIDENCE_SAFE_BLOCK, EVIDENCE_STEPS,
 )
 from ..rail import RailPayload
+from ..viewer_worker import ViewerJob
 
 
 def _human_size(num_bytes):
@@ -254,20 +255,72 @@ class _Viewer(QFrame):
 
     def show_artifact(self, e, tier, case=None):
         self._case_ref = case or {}
+        self._current = e
+        self._current_tier = tier
+        # Token guards against stale results: if the user switches artifact or
+        # tier before a parse finishes, the arriving result no longer matches
+        # and is dropped.
+        self._token = f"{e['id']}:{tier}"
+        self._rendered_shown = self.RENDER_PAGE
         w.clear_layout(self._body)
         self._title.setText(f"{e['name']} · {e.get('kindLabel', '')} · "
                             f"{TIERS[tier - 1][0]}")
-        if tier == 1:
-            self._tier1(e)
-        elif tier == 2:
-            self._tier2(e)
+
+        kind_by_tier = {1: "raw", 2: "records", 3: "tree"}
+        self._show_loading(tier)
+
+        self._job = ViewerJob()
+        self._job.result_ready.connect(self._on_result)
+        self._job.run(kind_by_tier[tier], self._token,
+                      e.get("_path", ""), e.get("kind", ""))
+
+    def _show_loading(self, tier):
+        """Immediate responsive placeholder while the parse runs off-thread.
+
+        Indeterminate busy bar for the tiers whose total work isn't known
+        cheaply (packet count, file count). Raw preview reads only a few KB and
+        returns almost instantly, so a light line is enough there.
+        """
+        from PySide6.QtWidgets import QProgressBar
+        box = QFrame()
+        box.setObjectName("cardAlt")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(20, 26, 20, 26)
+        v.setSpacing(12)
+
+        label = {1: "Reading bytes", 2: "Parsing records",
+                 3: "Listing the image's files"}.get(tier, "Reading")
+        name = self._current.get("name", "artifact")
+        line = w.body(f"{label} from {name}…", size=12.5, color=P["text2"])
+        line.setAlignment(Qt.AlignCenter)
+        v.addWidget(line)
+
+        if tier in (2, 3):
+            bar = QProgressBar()
+            bar.setRange(0, 0)  # indeterminate: honest "working", no fake %
+            bar.setTextVisible(False)
+            bar.setFixedWidth(260)
+            v.addWidget(bar, 0, Qt.AlignCenter)
+
+        self._body.addWidget(box)
+        self._body.addStretch(1)
+
+    def _on_result(self, token, result):
+        if token != self._token:
+            return  # stale: user moved on before this parse finished
+        w.clear_layout(self._body)
+        e = self._current
+        if self._current_tier == 1:
+            self._tier1(e, result)
+        elif self._current_tier == 2:
+            self._tier2(e, result)
         else:
-            self._tier3(e)
+            self._tier3(e, result)
         self._body.addStretch(1)
 
     # ── tier 1 · raw ──────────────────────────────────────────────────────────
 
-    def _tier1(self, e):
+    def _tier1(self, e, preview):
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(14)
@@ -278,12 +331,9 @@ class _Viewer(QFrame):
         hv.setContentsMargins(14, 12, 14, 12)
         hv.setSpacing(2)
 
-        # Real bytes from the selected artifact — read read-only, nothing
-        # hardcoded. The signature line at the bottom is detected from those
-        # bytes, not assumed from the file name.
-        from ..artifact_viewer import raw_preview
-        preview = raw_preview(e.get("_path", ""))
-        self._raw_preview_cache = preview  # used by the metadata column below
+        # Real bytes from the selected artifact, parsed off-thread and passed
+        # in. The signature line is detected from those bytes, not the name.
+        self._raw_preview_cache = preview
 
         if preview.get("error"):
             hv.addWidget(w.body(preview["error"], size=11, color=P["sevMedium"],
@@ -336,47 +386,6 @@ class _Viewer(QFrame):
         self._derived_events(e)
 
     def _derived_events(self, e):
-        """The events this artifact contributed to the timeline.
-
-        This is the per-artifact drill-down: metadata and bytes above, the
-        artifact's own share of the timeline here. Events carry the id of the
-        artifact they were parsed from, so this is a real filter, not a guess.
-        """
-        events = [ev for ev in (self.case or {}).get("events", [])
-                  if ev.get("artifact") == e.get("id")]
-
-        self._body.addWidget(w.spacer(h=6))
-        self._body.addWidget(w.micro_label(
-            f"EVENTS FROM THIS ARTIFACT ({len(events)})"))
-        self._body.addWidget(w.hline(P["line"]))
-
-        if not events:
-            self._body.addWidget(w.body(
-                "This artifact contributed no events to the timeline. If that "
-                "is unexpected, the audit trail records why its parser produced "
-                "nothing.", size=11.5, color=P["text3"], lh=1.45))
-            return
-
-        for event in events[:25]:
-            line = QHBoxLayout()
-            line.setContentsMargins(0, 6, 0, 6)
-            line.setSpacing(12)
-            stamp = w.label(str(event.get("ts", "")), size=10.5, mono=True,
-                            color=P["text3"])
-            stamp.setFixedWidth(140)
-            line.addWidget(stamp)
-            line.addWidget(w.body(str(event.get("label", "")), size=11.5,
-                                  weight=theme.W_REGULAR, lh=1.3), 1)
-            self._body.addLayout(line)
-            self._body.addWidget(w.hline())
-
-        if len(events) > 25:
-            self._body.addWidget(w.body(
-                f"Showing the first 25 of {len(events):,}. The full sequence is "
-                f"on the Timeline screen.", size=11, color=P["text3"], lh=1.4))
-        self._derived_events(e)
-
-    def _derived_events(self, e):
         """The events this artifact produced, shown with the artifact itself.
 
         This is the drill-down link between an artifact and the timeline: the
@@ -418,18 +427,14 @@ class _Viewer(QFrame):
 
     # ── tier 2 · rendered ─────────────────────────────────────────────────────
 
-    def _tier2(self, e):
-        """Rendered view: real parsed records from the actual artifact.
+    def _tier2(self, e, result):
+        """Rendered view: real parsed records, parsed off-thread and passed in.
 
-        The old fixture tables are gone. Records come from the parser that
-        matches the artifact's kind; a kind with no parser shows an honest
-        message rather than borrowed sample rows.
+        A kind with no parser shows an honest message rather than borrowed
+        sample rows.
         """
-        from ..artifact_viewer import rendered_records
-        result = rendered_records(e.get("_path", ""), e.get("kind", ""))
-
-        if not result["supported"] or not result["columns"]:
-            self._tier2_message(result["note"] or result.get("error", ""))
+        if not result.get("supported") or not result.get("columns"):
+            self._tier2_message(result.get("note") or result.get("error", ""))
             return
 
         head = QHBoxLayout()
@@ -440,8 +445,15 @@ class _Viewer(QFrame):
         self._body.addLayout(head)
         self._body.addWidget(w.hline(P["line"]))
 
-        # Cap realized rows so a large capture can't stall the panel.
-        for record in result["rows"][:150]:
+        # Realize a page of rows, not all of them: even after the parse is
+        # off-thread, building a nested layout per row is real UI-thread work.
+        # A "show more" button reveals the next page, like the timeline screen.
+        self._rendered_rows = result["rows"]
+        self._rendered_columns = result["columns"]
+        self._rendered_note = result["note"]
+        self._rendered_shown = getattr(self, "_rendered_shown", 0) or self.RENDER_PAGE
+        visible = result["rows"][:self._rendered_shown]
+        for record in visible:
             row = QHBoxLayout()
             row.setContentsMargins(0, 6, 0, 6)
             row.setSpacing(12)
@@ -451,12 +463,33 @@ class _Viewer(QFrame):
             self._body.addLayout(row)
             self._body.addWidget(w.hline())
 
+        remaining = len(result["rows"]) - len(visible)
+        if remaining > 0:
+            from PySide6.QtWidgets import QPushButton
+            from PySide6.QtGui import QCursor
+            step = min(self.RENDER_PAGE, remaining)
+            more = QPushButton(f"Show {step} more  ·  {remaining} not shown")
+            more.setObjectName("pill")
+            more.setCursor(QCursor(Qt.PointingHandCursor))
+            more.clicked.connect(self._show_more_rendered)
+            self._body.addWidget(more)
+
         caption = result["note"]
-        if len(result["rows"]) > 150:
-            caption += f" · showing first 150 of {len(result['rows'])}"
         if caption:
             self._body.addWidget(w.spacer(h=2))
             self._body.addWidget(w.body(caption, size=11, color=P["text3"], lh=1.4))
+
+    RENDER_PAGE = 60
+
+    def _show_more_rendered(self):
+        self._rendered_shown = getattr(self, "_rendered_shown", self.RENDER_PAGE) \
+            + self.RENDER_PAGE
+        # Re-render tier 2 from the cached rows without re-parsing.
+        w.clear_layout(self._body)
+        self._tier2(self._current,
+                    {"columns": self._rendered_columns, "rows": self._rendered_rows,
+                     "note": self._rendered_note, "supported": True, "error": ""})
+        self._body.addStretch(1)
 
     def _tier2_message(self, message):
         box = QFrame()
@@ -477,17 +510,13 @@ class _Viewer(QFrame):
 
     # ── tier 3 · browse ───────────────────────────────────────────────────────
 
-    def _tier3(self, e):
-        """Browse the files: the real filesystem walked from a disk image.
-
-        For non-disk artifacts this tier is honestly disabled with the reason.
-        Deleted/recovered entries are marked.
+    def _tier3(self, e, result):
+        """Browse the files: real filesystem from a disk image, parsed
+        off-thread and passed in. Non-disk artifacts are honestly disabled;
+        deleted/recovered entries are marked.
         """
-        from ..artifact_viewer import file_tree
-        result = file_tree(e.get("_path", ""), e.get("kind", ""))
-
-        if not result["supported"]:
-            self._tier2_message(result["note"])
+        if not result.get("supported"):
+            self._tier2_message(result.get("note", ""))
             return
         if result.get("error"):
             self._tier2_message(result["error"])

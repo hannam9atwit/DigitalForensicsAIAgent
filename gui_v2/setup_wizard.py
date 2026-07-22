@@ -22,11 +22,12 @@ import urllib.request
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit,
+    QDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTextEdit,
     QVBoxLayout,
 )
 
 from core import ollama_runtime
+from . import theme
 
 # Permanent latest-stable URL — never pins a stale version.
 OLLAMA_WINDOWS_URL = "https://ollama.com/download/OllamaSetup.exe"
@@ -34,7 +35,9 @@ OLLAMA_LINUX_INSTALL_CMD = "curl -fsSL https://ollama.com/install.sh | sh"
 
 
 class _SetupWorker(QObject):
-    progress = Signal(str)
+    progress = Signal(str)   # detailed log line (shown behind "show details")
+    phase = Signal(str)      # clean step status for the themed UI
+    pct = Signal(int)        # model-download percentage (0-100), -1 = indeterminate
     done = Signal(bool)
 
     def run(self):
@@ -43,18 +46,24 @@ class _SetupWorker(QObject):
             self.progress.emit(f"[*] Detected OS: {system}")
 
             if ollama_runtime.is_installed():
+                self.phase.emit("Ollama is already installed.")
                 self.progress.emit("[+] Ollama already installed.")
             else:
+                self.phase.emit("Installing Ollama…")
+                self.pct.emit(-1)
                 self.progress.emit("[*] Ollama not found — installing...")
                 if system == "Windows":
                     self._install_windows()
                 elif system == "Linux":
                     self._install_linux()
                 else:
+                    self.phase.emit("This OS can't install Ollama automatically.")
                     self.progress.emit("[!] Unsupported OS for automatic install.")
                     self.done.emit(False)
                     return
 
+            self.phase.emit("Starting the local AI service…")
+            self.pct.emit(-1)
             self.progress.emit("[*] Starting the Ollama service...")
             if not ollama_runtime.start_server():
                 raise RuntimeError(
@@ -63,20 +72,35 @@ class _SetupWorker(QObject):
 
             model = ollama_runtime.DEFAULT_MODEL
             if ollama_runtime.model_available(model):
+                self.phase.emit(f"Model {model} is already downloaded.")
                 self.progress.emit(f"[+] Model {model} already present.")
             else:
+                self.phase.emit(f"Downloading the model ({model}, ~2 GB)…")
                 self.progress.emit(
                     f"[*] Downloading model {model} (~2 GB — this may take a while)...")
                 if not ollama_runtime.pull_model(
-                        model, on_progress=lambda s: self.progress.emit(f"    {s}")):
+                        model, on_progress=self._on_pull_progress):
                     raise RuntimeError(f"model pull failed for {model}")
 
+            self.phase.emit("Local AI is ready.")
             self.progress.emit("[✓] Setup complete — local AI is ready.")
             self.done.emit(True)
 
         except Exception as error:
+            self.phase.emit(f"Setup couldn't finish: {error}")
             self.progress.emit(f"[!] Setup failed: {error}")
             self.done.emit(False)
+
+    def _on_pull_progress(self, status: str):
+        self.progress.emit(f"    {status}")
+        # pull_model reports "<status> — NN%" when a percentage is known.
+        if "%" in status:
+            try:
+                percent = int(status.rsplit("—", 1)[-1].strip().rstrip("%"))
+                self.pct.emit(percent)
+            except (ValueError, IndexError):
+                pass
+
 
     def _install_windows(self):
         installer_path = os.path.join(tempfile.gettempdir(), "OllamaSetup.exe")
@@ -107,50 +131,90 @@ class _SetupWorker(QObject):
 
 
 class SetupWizard(QDialog):
-    """Modal first-run dialog: install local AI, or skip to rule-based mode."""
+    """First-run local-AI setup, presented as a themed multi-step flow.
+
+    The install/start/pull logic lives in _SetupWorker (unchanged). This class
+    is presentation only: themed steps, one clean status line, a real
+    percentage bar for the model download and an indeterminate bar for steps
+    whose duration is unknown, with the detailed log tucked behind a
+    "show details" expander.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("First-Time Setup — Local AI")
-        self.setMinimumSize(560, 420)
+        self._P = theme.GUIDED
+        self.setWindowTitle("Local AI Setup — AIRforensics")
+        self.setMinimumSize(560, 460)
         self.setModal(True)
+        self.setStyleSheet(f"QDialog {{ background: {self._P['bg']}; }}")
         self._thread = None
         self._worker = None
         self._build()
 
     def _build(self):
+        from . import widgets as w
+        P = self._P
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(28, 26, 28, 22)
+        layout.setSpacing(14)
 
-        header = QLabel("<b style='font-size:16pt'>Local AI Setup</b>")
-        layout.addWidget(header)
+        layout.addWidget(w.label("Local AI Setup", size=20,
+                                 weight=theme.W_SEMIBOLD, color=P["text"]))
+        layout.addWidget(w.body(
+            "AIRforensics uses a language model running on this machine to write "
+            "case overviews, plain-language explanations, and the report. "
+            "Everything stays local — evidence never leaves this computer.",
+            size=12.5, color=P["text2"], lh=1.5))
 
-        description = QLabel(
-            "This app uses a local language model (via Ollama) to write the case "
-            "overview, plain-language explanations, and the investigation report. "
-            "Everything runs on this machine — evidence never leaves it.\n\n"
-            "Setup will:\n"
-            "  • Install Ollama (if not already installed)\n"
-            f"  • Download the {ollama_runtime.DEFAULT_MODEL} model (~2 GB)\n\n"
-            "You can skip this and use the built-in rule-based text instead; "
-            "local AI can be enabled later from Settings.")
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        steps = QFrame()
+        steps.setObjectName("cardAlt")
+        sv = QVBoxLayout(steps)
+        sv.setContentsMargins(16, 14, 16, 14)
+        sv.setSpacing(6)
+        for text in ("1.  Install Ollama, the local AI runtime",
+                     f"2.  Download the model ({ollama_runtime.DEFAULT_MODEL}, ~2 GB)",
+                     "3.  Start it and hand off to the app"):
+            sv.addWidget(w.body(text, size=12, color=P["text2"], lh=1.4))
+        layout.addWidget(steps)
+
+        self._phase = w.body("Ready to set up local AI.", size=13,
+                             weight=theme.W_MEDIUM, color=P["text"])
+        layout.addWidget(self._phase)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{ background: {P['panelAlt']}; border: none;
+                            border-radius: 3px; }}
+            QProgressBar::chunk {{ background: {P['accent']};
+                                   border-radius: 3px; }}
+        """)
+        layout.addWidget(self.progress_bar)
+
+        # Detailed log, collapsed by default.
+        self._details_button = QPushButton("Show details")
+        self._details_button.setFlat(True)
+        self._details_button.setStyleSheet(
+            f"color: {P['text3']}; text-align: left; border: none;")
+        self._details_button.clicked.connect(self._toggle_details)
+        layout.addWidget(self._details_button)
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setFixedHeight(170)
-        self.log.setStyleSheet("font-family: monospace; font-size: 12px;")
+        self.log.setFixedHeight(120)
+        self.log.setVisible(False)
+        self.log.setStyleSheet(
+            f"font-family: monospace; font-size: 11px; color: {P['text3']}; "
+            f"background: {P['panelAlt']}; border: 1px solid {P['line']};")
         layout.addWidget(self.log)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
+        layout.addStretch(1)
 
         buttons = QHBoxLayout()
-        self.install_button = QPushButton("Install local AI (Ollama + model)")
-        self.install_button.setStyleSheet("padding: 8px; font-weight: bold;")
+        self.install_button = QPushButton("Install local AI")
+        self.install_button.setObjectName("primary")
         self.install_button.clicked.connect(self._start)
         buttons.addWidget(self.install_button)
 
@@ -160,14 +224,21 @@ class SetupWizard(QDialog):
         layout.addLayout(buttons)
 
         self.close_button = QPushButton("Continue to the app")
+        self.close_button.setObjectName("primary")
         self.close_button.setVisible(False)
         self.close_button.clicked.connect(self.accept)
         layout.addWidget(self.close_button)
+
+    def _toggle_details(self):
+        showing = not self.log.isVisible()
+        self.log.setVisible(showing)
+        self._details_button.setText("Hide details" if showing else "Show details")
 
     def _start(self):
         self.install_button.setEnabled(False)
         self.skip_button.setEnabled(False)
         self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # indeterminate until a % arrives
 
         self._thread = QThread()
         self._worker = _SetupWorker()
@@ -175,11 +246,20 @@ class SetupWizard(QDialog):
 
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._append_log)
+        self._worker.phase.connect(self._phase.setText)
+        self._worker.pct.connect(self._set_pct)
         self._worker.done.connect(self._finished)
         self._worker.done.connect(self._thread.quit)
         self._thread.finished.connect(self._thread.deleteLater)
 
         self._thread.start()
+
+    def _set_pct(self, percent: int):
+        if percent < 0:
+            self.progress_bar.setRange(0, 0)  # indeterminate
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(percent)
 
     def _append_log(self, message: str):
         self.log.append(message)
