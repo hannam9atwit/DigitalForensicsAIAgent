@@ -27,6 +27,7 @@ from .. import theme, widgets as w
 from ..content import SUGGESTED, ANSWERS, FALLBACK_ANSWER, RAIL_STATIC
 from ..rail import RailPayload
 from .base import Screen
+from core import ollama_runtime
 
 P = theme.GUIDED
 
@@ -105,7 +106,48 @@ class ChatScreen(Screen):
 
     def on_show(self, arg=None):
         super().on_show(arg)
-        self._engine_pill.setText(self._engine_label())
+        # Show a cheap, non-blocking label immediately, then refresh the real
+        # status off-thread so opening the chat never stalls on network I/O.
+        config = self.ai_config or {}
+        provider = config.get("provider", "ollama")
+        if provider == "none":
+            self._engine_pill.setText("RULE-BASED · NO AI")
+            return
+        if provider != "ollama":
+            key_state = "KEY SET" if config.get("api_key") else "NO KEY"
+            self._engine_pill.setText(f"CLOUD · {provider.upper()} · {key_state}")
+            return
+
+        self._engine_pill.setText("LOCAL · CHECKING…")
+        self._refresh_engine_pill_async()
+
+    def _refresh_engine_pill_async(self):
+        from PySide6.QtCore import QObject, QThread, Signal
+        model = (self.ai_config or {}).get("model", "llama3.2:3b")
+
+        class _PillProbe(QObject):
+            ready = Signal(str)
+
+            def run(self):
+                health = ollama_runtime.readiness(model)
+                if health["model_ready"]:
+                    text = f"LOCAL · {model} · READY"
+                elif health["running"]:
+                    text = f"LOCAL · {model} · MODEL MISSING"
+                elif health["installed"]:
+                    text = "LOCAL · OLLAMA STOPPED"
+                else:
+                    text = "LOCAL · NOT INSTALLED"
+                self.ready.emit(text)
+
+        self._pill_thread = QThread()
+        self._pill_probe = _PillProbe()
+        self._pill_probe.moveToThread(self._pill_thread)
+        self._pill_thread.started.connect(self._pill_probe.run)
+        self._pill_probe.ready.connect(self._engine_pill.setText)
+        self._pill_probe.ready.connect(self._pill_thread.quit)
+        self._pill_thread.finished.connect(self._pill_thread.deleteLater)
+        self._pill_thread.start()
 
     def _engine_label(self):
         """Live engine status. For local AI this reflects real readiness
@@ -119,7 +161,6 @@ class ChatScreen(Screen):
             key_state = "KEY SET" if config.get("api_key") else "NO KEY"
             return f"CLOUD · {provider.upper()} · {key_state}"
 
-        from core import ollama_runtime
         model = config.get("model", "llama3.2:3b")
         health = ollama_runtime.readiness(model)
         if health["model_ready"]:
@@ -274,7 +315,6 @@ class ChatScreen(Screen):
     def _engine_unavailable_answer(self) -> dict:
         """Explain exactly which link in the local-AI chain is missing, so the
         examiner can fix it, instead of returning a fabricated answer."""
-        from core import ollama_runtime
         provider = (self.ai_config or {}).get("provider", "ollama")
 
         if provider in ("anthropic", "openai", "gemini"):

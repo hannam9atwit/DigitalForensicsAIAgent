@@ -27,14 +27,26 @@ DEFAULT_MODEL = "llama3.2:3b"
 
 _SERVER_START_TIMEOUT_S = 20
 _HTTP_TIMEOUT_S = 4
+# Faster probe for interactive status checks: the UI asks for readiness on
+# every screen show, and a full 4s-per-call wait when Ollama is absent makes
+# the whole app feel frozen. Status probes use this shorter timeout; the real
+# work calls (pull, warm, generate) keep the longer ones.
+_STATUS_TIMEOUT_S = 1.5
+
+# readiness() is called from UI render paths (chat pill, settings). Each call
+# otherwise makes up to three blocking HTTP requests, so opening a screen could
+# stall for seconds. A short cache means repeated calls within the window reuse
+# the last probe instead of re-hitting the network every render.
+_READINESS_CACHE = {"value": None, "at": 0.0, "model": None}
+_READINESS_TTL_S = 3.0
 
 
 def find_executable() -> str | None:
-    """Return the path to the ollama executable, or None if not installed.
+    """Return the path to the ollama executable, or None if not found.
 
-    Checks PATH first, then the per-user Windows install location (the Ollama
-    installer is per-user and does not always update PATH for the current
-    process), then common Linux locations.
+    Checks PATH first, then every known Windows install location across Ollama
+    versions (the install path has moved between releases and differs for
+    per-user vs all-users installs), then common Unix locations.
     """
     on_path = shutil.which("ollama")
     if on_path:
@@ -42,19 +54,32 @@ def find_executable() -> str | None:
 
     if platform.system() == "Windows":
         local_app_data = os.environ.get("LOCALAPPDATA", "")
-        candidate = os.path.join(local_app_data, "Programs", "Ollama", "ollama.exe")
-        if os.path.isfile(candidate):
-            return candidate
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get(
+            "ProgramFiles(x86)", r"C:\Program Files (x86)")
+        candidates = [
+            os.path.join(local_app_data, "Programs", "Ollama", "ollama.exe"),
+            os.path.join(local_app_data, "Ollama", "ollama.exe"),
+            os.path.join(program_files, "Ollama", "ollama.exe"),
+            os.path.join(program_files_x86, "Ollama", "ollama.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.isfile(candidate):
+                return candidate
         return None
 
-    for candidate in ("/usr/local/bin/ollama", "/usr/bin/ollama"):
+    for candidate in ("/usr/local/bin/ollama", "/usr/bin/ollama",
+                      os.path.expanduser("~/.ollama/bin/ollama")):
         if os.path.isfile(candidate):
             return candidate
     return None
 
 
 def is_installed() -> bool:
-    return find_executable() is not None
+    """True if Ollama is present. A server already answering on the API port
+    is itself proof Ollama is installed, even when the executable sits in a
+    location we don't recognize — so that counts too."""
+    return find_executable() is not None or server_running()
 
 
 def server_running() -> bool:
@@ -116,6 +141,7 @@ def start_server() -> bool:
     deadline = time.monotonic() + _SERVER_START_TIMEOUT_S
     while time.monotonic() < deadline:
         if server_running():
+            invalidate_readiness_cache()
             return True
         time.sleep(0.5)
     return False
@@ -202,25 +228,69 @@ def warm_model(model: str = DEFAULT_MODEL) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120):
+        with urllib.request.urlopen(request, timeout=60):
+            invalidate_readiness_cache()
             return True
     except (urllib.error.URLError, OSError):
         return False
 
 
-def readiness(model: str = DEFAULT_MODEL) -> dict:
+def readiness(model: str = DEFAULT_MODEL, use_cache: bool = True) -> dict:
     """One-call health summary the GUI can render directly.
 
     Returns {"installed", "running", "model_ready", "model_loaded"} — each a
     bool, evaluated in dependency order (a stopped server can't report
     models). model_loaded distinguishes a warm model from one merely present.
+
+    Cached for a few seconds because the UI calls this on every screen show;
+    without the cache, each call makes up to three blocking HTTP requests and
+    the app hitches. Pass use_cache=False to force a fresh probe (e.g. after a
+    manual re-check).
     """
+    now = time.monotonic()
+    if (use_cache and _READINESS_CACHE["value"] is not None
+            and _READINESS_CACHE["model"] == model
+            and now - _READINESS_CACHE["at"] < _READINESS_TTL_S):
+        return dict(_READINESS_CACHE["value"])
+
     installed = is_installed()
-    running = server_running()
-    ready = model_available(model) if running else False
+    running = _server_running_fast()
+    ready = _model_available_fast(model) if running else False
     loaded = model_loaded(model) if ready else False
-    return {"installed": installed, "running": running,
-            "model_ready": ready, "model_loaded": loaded}
+    value = {"installed": installed, "running": running,
+             "model_ready": ready, "model_loaded": loaded}
+
+    _READINESS_CACHE["value"] = value
+    _READINESS_CACHE["at"] = now
+    _READINESS_CACHE["model"] = model
+    return dict(value)
+
+
+def invalidate_readiness_cache():
+    """Force the next readiness() call to re-probe (after start/stop/pull)."""
+    _READINESS_CACHE["value"] = None
+
+
+def _server_running_fast() -> bool:
+    """server_running() with the short status timeout."""
+    try:
+        request = urllib.request.Request(f"{OLLAMA_HOST}/api/tags", method="GET")
+        with urllib.request.urlopen(request, timeout=_STATUS_TIMEOUT_S):
+            return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def _model_available_fast(model: str = DEFAULT_MODEL) -> bool:
+    try:
+        request = urllib.request.Request(f"{OLLAMA_HOST}/api/tags", method="GET")
+        with urllib.request.urlopen(request, timeout=_STATUS_TIMEOUT_S) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    base = model.split(":")[0]
+    return any(base == m.get("name", "").split(":")[0]
+               for m in body.get("models", []))
 
 
 def ensure_ready(model: str = DEFAULT_MODEL) -> dict:
@@ -232,4 +302,4 @@ def ensure_ready(model: str = DEFAULT_MODEL) -> dict:
     """
     if is_installed() and not server_running():
         start_server()
-    return readiness(model)
+    return readiness(model, use_cache=False)
