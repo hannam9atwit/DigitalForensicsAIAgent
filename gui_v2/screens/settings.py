@@ -135,6 +135,7 @@ class SettingsScreen(Screen):
         network calls. (Settings is constructed eagerly on every case open, so
         a synchronous probe here would stall every case-entry.)"""
         from PySide6.QtCore import QObject, QThread, Signal
+        from .. import thread_registry
         model = self.settings.get("ollama_model", "llama3.2:3b")
 
         class _DetailProbe(QObject):
@@ -143,14 +144,21 @@ class SettingsScreen(Screen):
             def run(self):
                 self.ready.emit(ollama_runtime.readiness(model))
 
-        self._detail_thread = QThread()
-        self._detail_probe = _DetailProbe()
-        self._detail_probe.moveToThread(self._detail_thread)
-        self._detail_thread.started.connect(self._detail_probe.run)
-        self._detail_probe.ready.connect(self._apply_health)
-        self._detail_probe.ready.connect(self._detail_thread.quit)
-        self._detail_thread.finished.connect(self._detail_thread.deleteLater)
-        self._detail_thread.start()
+        # The thread and probe live in thread_registry, NOT in a screen
+        # attribute: this screen is rebuilt and torn down on every case entry,
+        # and a probe held only on the screen would be freed mid-run when the
+        # stack is cleared — the "QThread: Destroyed while running" crash. The
+        # registry keeps both alive until the thread finishes; if this screen is
+        # gone by then, Qt has already disconnected _apply_health, so the stale
+        # result is dropped harmlessly.
+        thread = QThread()
+        probe = _DetailProbe()
+        probe.moveToThread(thread)
+        thread.started.connect(probe.run)
+        probe.ready.connect(self._apply_health)
+        probe.ready.connect(thread.quit)
+        thread_registry.track(thread, probe)
+        thread.start()
 
     def _apply_health(self, health):
         """Update the status chip and the detail line from one probe result.
@@ -184,6 +192,7 @@ class SettingsScreen(Screen):
         status stuck on "Re-checking…" forever.
         """
         from PySide6.QtCore import QObject, QThread, Signal
+        from .. import thread_registry
 
         self._ai_detail.setText("Re-checking local AI…")
         self._recheck_btn_disable()
@@ -214,14 +223,17 @@ class SettingsScreen(Screen):
                 worker.join(timeout=45)
                 self.done.emit(result["health"] if result["finished"] else None)
 
-        self._recheck_thread = QThread()
-        self._recheck_probe = _Probe()
-        self._recheck_probe.moveToThread(self._recheck_thread)
-        self._recheck_thread.started.connect(self._recheck_probe.run)
-        self._recheck_probe.done.connect(self._recheck_finished)
-        self._recheck_probe.done.connect(self._recheck_thread.quit)
-        self._recheck_thread.finished.connect(self._recheck_thread.deleteLater)
-        self._recheck_thread.start()
+        # Held by thread_registry, not on the screen, and never overwritten by a
+        # later click: each re-check gets its own tracked thread that the
+        # registry releases only when it has finished.
+        thread = QThread()
+        probe = _Probe()
+        probe.moveToThread(thread)
+        thread.started.connect(probe.run)
+        probe.done.connect(self._recheck_finished)
+        probe.done.connect(thread.quit)
+        thread_registry.track(thread, probe)
+        thread.start()
 
     def _recheck_btn_disable(self):
         if hasattr(self, "_recheck_button"):

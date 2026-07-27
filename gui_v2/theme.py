@@ -122,11 +122,28 @@ def load_fonts():
 
 
 def base_font():
-    """Body text: 13px Lexend Light, with the symbol fallbacks."""
+    """Body text: ~13px Lexend Light, with the symbol fallbacks.
+
+    The size is set in POINTS, not pixels, on purpose. An application-wide
+    default set with setPixelSize leaves QFont.pointSize() at -1, and Qt's
+    stylesheet and native-widget font resolution then re-apply that -1 —
+    "QFont::setPointSize: Point size <= 0 (-1)" on every styled widget. A point
+    size keeps pointSize() valid; converting 13px at the screen's logical DPI
+    keeps the rendered size identical to before. Individual widgets still set
+    their own pixel sizes (see widgets._font), so this only governs the few
+    that fall back to the inherited default.
+    """
     from PySide6.QtGui import QFont
+    from PySide6.QtWidgets import QApplication
     f = QFont()
     f.setFamilies([SANS, "Segoe UI", "Segoe UI Symbol", "Arial"])
-    f.setPixelSize(13)
+    dpi = 96.0
+    app_ = QApplication.instance()
+    if app_ is not None and app_.primaryScreen() is not None:
+        screen_dpi = app_.primaryScreen().logicalDotsPerInch()
+        if screen_dpi > 0:
+            dpi = screen_dpi
+    f.setPointSizeF(13.0 * 72.0 / dpi)
     f.setWeight(QFont.Weight(W_LIGHT))
     return f
 
@@ -388,6 +405,7 @@ def stylesheet(p: dict = None) -> str:
         padding: 8px;
         text-align: left;
         color: {p['text']};
+        font-size: 13px;
         font-weight: {W_LIGHT};
     }}
     QPushButton#row:hover {{ background: {p['panelAlt']}; }}

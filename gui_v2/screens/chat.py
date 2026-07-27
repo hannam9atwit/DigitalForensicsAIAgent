@@ -123,6 +123,7 @@ class ChatScreen(Screen):
 
     def _refresh_engine_pill_async(self):
         from PySide6.QtCore import QObject, QThread, Signal
+        from .. import thread_registry
         model = (self.ai_config or {}).get("model", "llama3.2:3b")
 
         class _PillProbe(QObject):
@@ -140,14 +141,18 @@ class ChatScreen(Screen):
                     text = "LOCAL · NOT INSTALLED"
                 self.ready.emit(text)
 
-        self._pill_thread = QThread()
-        self._pill_probe = _PillProbe()
-        self._pill_probe.moveToThread(self._pill_thread)
-        self._pill_thread.started.connect(self._pill_probe.run)
-        self._pill_probe.ready.connect(self._engine_pill.setText)
-        self._pill_probe.ready.connect(self._pill_thread.quit)
-        self._pill_thread.finished.connect(self._pill_thread.deleteLater)
-        self._pill_thread.start()
+        # Tracked in thread_registry rather than a screen attribute: on_show can
+        # fire this repeatedly and the screen is torn down on case switches, so a
+        # probe held only on the screen could be freed mid-run. The registry
+        # keeps it alive until the thread finishes.
+        thread = QThread()
+        probe = _PillProbe()
+        probe.moveToThread(thread)
+        thread.started.connect(probe.run)
+        probe.ready.connect(self._engine_pill.setText)
+        probe.ready.connect(thread.quit)
+        thread_registry.track(thread, probe)
+        thread.start()
 
     def _engine_label(self):
         """Live engine status. For local AI this reflects real readiness
