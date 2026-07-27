@@ -268,6 +268,11 @@ def stylesheet(p: dict = None) -> str:
         border: 1px solid rgba(61, 139, 99, 0.25);
         border-radius: 8px;
     }}
+    QFrame#noticeWarn {{
+        background: rgba(168, 138, 58, 0.08);
+        border: 1px solid rgba(168, 138, 58, 0.28);
+        border-radius: 8px;
+    }}
     QFrame#dashed {{
         background: transparent;
         border: 1px dashed {p['lineInput']};

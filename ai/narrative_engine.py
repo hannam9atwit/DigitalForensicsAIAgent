@@ -13,8 +13,16 @@ class NarrativeEngine:
 
     def __init__(self, ai_config: dict | None = None):
         self.refiner = RefinementEngine(ai_config)
+        # Mirrors the refiner's record of who drafted the report. Set for real
+        # by generate(); until then it reflects the refiner's honest default.
+        self.ai_status = self.refiner.ai_status
 
-    def generate(self, analysis: dict) -> str:
+    def cancel(self):
+        """Forward a cancellation request to the refiner running the draft, so
+        a torn-down UI can stop an in-flight generate() promptly."""
+        self.refiner.cancel()
+
+    def generate(self, analysis: dict, on_progress=None) -> str:
         findings  = analysis.get("findings", [])
         anomalies = analysis.get("anomalies", [])
         timeline  = analysis.get("timeline", {}).get("events", [])
@@ -47,7 +55,12 @@ class NarrativeEngine:
 
         # Pass BOTH the raw scaffold AND the full structured analysis to the
         # refiner so the LLM has maximum context, and the fallback has text.
-        refined = self.refiner.refine(raw, analysis=analysis)
+        # on_progress rides through so a UI can show per-section progress.
+        refined = self.refiner.refine(raw, analysis=analysis,
+                                      on_progress=on_progress)
+        # The refiner recorded whether the model actually drafted the report
+        # and, if not, why. Surface it so callers can be honest about it.
+        self.ai_status = self.refiner.ai_status
         return refined
 
     # ============================================================

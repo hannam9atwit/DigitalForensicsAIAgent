@@ -105,15 +105,32 @@ class IntakeDialog(QDialog):
 
     # ── result ─────────────────────────────────────────────────────────────────
 
-    def build(self, log=print):
-        """Create the CaseBuilder, hash every file on intake, return it."""
-        cb = CaseBuilder(
+    def make_builder(self):
+        """The CaseBuilder with metadata only — no files hashed yet.
+
+        The Qt fields are read here, on the UI thread; hashing the files (the
+        slow part) is left to the caller to run off-thread, so intake never
+        freezes the window. See MainWindow.new_case.
+        """
+        return CaseBuilder(
             examiner=self.examiner.text().strip() or "Examiner",
             examiner_id=self.examiner_id.text().strip() or "EX-00",
             agency=self.agency.text().strip(),
             case_id=self.case_num.text().strip() or None,
             title=self.title.text().strip() or "Untitled investigation",
         )
+
+    def file_paths(self):
+        """The evidence paths chosen in the dialog, read on the UI thread."""
+        return list(self._files)
+
+    def build(self, log=print):
+        """Create the CaseBuilder and hash every file on intake, then return it.
+
+        Retained for headless/non-GUI callers; the GUI splits this into
+        make_builder() + off-thread hashing so it never blocks the event loop.
+        """
+        cb = self.make_builder()
         for p in self._files:
             log(f"[*] Hashing {os.path.basename(p)} …")
             cb.add_evidence(p)

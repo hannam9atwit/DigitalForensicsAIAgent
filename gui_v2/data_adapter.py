@@ -19,8 +19,64 @@ list instead of inventing structure.
 """
 
 import datetime
+import re
 
 from .content import REPORT_TITLE
+
+# ── narrative parsing ───────────────────────────────────────────────────────────
+
+# The narrative engine emits its report as "## N. Title" sections separated by
+# "---" rules. A section boundary is a heading that carries a leading number;
+# the "### label" sub-headings inside a section deliberately do NOT match, so a
+# section keeps its own prose and sub-headings.
+_NARRATIVE_HEADING = re.compile(r"^#{1,3}\s+\d+\.\s+(.+?)\s*$")
+
+
+def parse_narrative_sections(markdown: str) -> dict:
+    """Split the model's multi-section report into {normalized-title: prose}.
+
+    Titles are lowercased with the leading number stripped ("## 1. Executive
+    Summary" -> "executive summary") so a caller can look a section up by name.
+    Returns {} for rule-based or empty text that carries no numbered headings.
+    """
+    sections, current, buf = {}, None, []
+    for line in (markdown or "").splitlines():
+        heading = _NARRATIVE_HEADING.match(line.strip())
+        if heading:
+            if current is not None:
+                sections[current] = "\n".join(buf).strip()
+            current = heading.group(1).strip().lower()
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def narrative_slots(markdown: str) -> dict:
+    """The model sections that map cleanly onto the demo report's fixed prose
+    slots — its Executive Summary paragraph and its Conclusion.
+
+    The demo's structure is otherwise data-driven (the findings, timeline and
+    custody tables), which is where the report_pdf "populate these, nothing
+    else" contract comes from. The model's other sections have no home in that
+    structure, so they are intentionally left out rather than bolted on as new
+    sections that would change the demo's look.
+    """
+    sections = parse_narrative_sections(markdown)
+
+    def pick(*needles):
+        for title, prose in sections.items():
+            if prose and any(n in title for n in needles):
+                return prose
+        return None
+
+    return {
+        "executive_summary": pick("executive summary"),
+        "conclusion": pick("conclusion"),
+    }
+
 
 # ── severity ──────────────────────────────────────────────────────────────────
 
@@ -182,6 +238,32 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
     raw_events = analysis.get("events", [])
     ev_ids = [e["id"] for e in evidence]
 
+    # Who drafted the narrative — the local model, or the rule-based fallback
+    # and why. Carried up so the report screen can say so out loud.
+    nar = analysis.get("narrative")
+    ai_status = nar.get("ai_status") if isinstance(nar, dict) else None
+
+    # The model's prose, parsed into the demo report's two fixed slots. Both the
+    # screen and the PDF read these, so the drafted Executive Summary and
+    # Conclusion land in the demo's structure and typography rather than being
+    # discarded or dumped raw.
+    narrative_md = (nar.get("markdown") if isinstance(nar, dict) else nar) or ""
+    slots = narrative_slots(narrative_md)
+
+    # The exact input the narrative engine drafts from, in its own shape, so the
+    # report screen can re-run generation on demand (with progress) without
+    # reaching back through the builder. Omitted when there is nothing analyzed.
+    narrative_input = None
+    if raw_findings or raw_events:
+        narrative_input = {
+            "findings": raw_findings,
+            "anomalies": analysis.get("anomalies", []),
+            "timeline": {"events": raw_events},
+            "browser": {},
+            "summary": {"finding_count": len(raw_findings),
+                        "anomaly_count": len(analysis.get("anomalies", []))},
+        }
+
     # ── findings ──────────────────────────────────────────────────────────────
     sorted_f = sorted(raw_findings, key=lambda f: -f.get("severity", 1))
     findings, fid_by_type = [], {}
@@ -277,6 +359,12 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
         "events": events,
         "findings": findings,
         "audit": list(audit),
+        "narrative": {
+            "ai_status": ai_status,
+            "executive_summary": slots["executive_summary"],
+            "conclusion": slots["conclusion"],
+        },
+        "narrativeInput": narrative_input,
         "paragraph": None,          # CaseScreen writes its own summary instead
         "report": {
             "title": REPORT_TITLE,
@@ -294,19 +382,23 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
 
 
 def _summary(analysis, findings, evidence, pipeline):
-    """The report's executive summary: the model's narrative if it wrote one,
-    otherwise a factual statement of what was examined and found."""
-    md = (analysis.get("narrative") or "").strip()
-    if md:
-        # First real paragraph of the generated markdown.
-        for block in md.split("\n\n"):
-            text = " ".join(l.strip() for l in block.splitlines()
-                            if l.strip() and not l.strip().startswith(("#", "-", "*")))
-            if len(text) > 80:
-                # Same sanitizer the PDF uses: the model's markdown must never
-                # reach a rendered surface (** and backticks in the preview).
-                from .report_pdf import _clean
-                return _clean(text)
+    """The report's executive summary: the model's Executive Summary section if
+    it drafted one, otherwise a factual statement of what was examined and found.
+
+    This mirrors the PDF, which reads narrative["executive_summary"] — the whole
+    parsed section, not just its first line — so the preview and the export show
+    the same prose in the demo's Executive Summary slot.
+    """
+    nar = analysis.get("narrative")
+    # narrative is {"markdown", "ai_status"} from the live pipeline; tolerate a
+    # bare string too, so older callers and fixtures keep working.
+    md = (nar.get("markdown") if isinstance(nar, dict) else nar) or ""
+    exec_summary = narrative_slots(md)["executive_summary"]
+    if exec_summary:
+        # Same sanitizer the PDF uses: the model's markdown must never reach a
+        # rendered surface with ** or backticks intact.
+        from .report_pdf import _clean
+        return _clean(exec_summary)
     crit = sum(1 for f in findings if f["sev"] == "CRITICAL")
     return (f"{len(evidence)} artifact(s) were examined and parsed into "
             f"{pipeline.get('eventsParsed', 0):,} events. The analysis produced "

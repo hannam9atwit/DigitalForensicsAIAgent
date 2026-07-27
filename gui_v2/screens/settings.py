@@ -130,27 +130,35 @@ class SettingsScreen(Screen):
         return e
 
     def _refresh_ai_detail_async(self):
-        """Probe readiness off-thread and update the detail line, so building
-        the Settings screen never blocks on Ollama network calls."""
+        """Probe readiness off-thread and update both the status chip and the
+        detail line, so building the Settings screen never blocks on Ollama
+        network calls. (Settings is constructed eagerly on every case open, so
+        a synchronous probe here would stall every case-entry.)"""
         from PySide6.QtCore import QObject, QThread, Signal
         model = self.settings.get("ollama_model", "llama3.2:3b")
-        detail_fn = self._detail_for_health
 
         class _DetailProbe(QObject):
-            ready = Signal(str)
+            ready = Signal(object)   # the readiness() health dict
 
             def run(self):
-                health = ollama_runtime.readiness(model)
-                self.ready.emit(detail_fn(health))
+                self.ready.emit(ollama_runtime.readiness(model))
 
         self._detail_thread = QThread()
         self._detail_probe = _DetailProbe()
         self._detail_probe.moveToThread(self._detail_thread)
         self._detail_thread.started.connect(self._detail_probe.run)
-        self._detail_probe.ready.connect(self._ai_detail.setText)
+        self._detail_probe.ready.connect(self._apply_health)
         self._detail_probe.ready.connect(self._detail_thread.quit)
         self._detail_thread.finished.connect(self._detail_thread.deleteLater)
         self._detail_thread.start()
+
+    def _apply_health(self, health):
+        """Update the status chip and the detail line from one probe result.
+        Runs on the UI thread (queued signal)."""
+        self._ai_detail.setText(self._detail_for_health(health))
+        text, color = self._status_text_color(health)
+        self._status_lbl.setText(text)
+        self._status_lbl.setStyleSheet(f"color: {color}; background: transparent;")
 
     def _detail_for_health(self, health):
         if health["model_loaded"]:
@@ -166,12 +174,6 @@ class SettingsScreen(Screen):
                     "Re-check to start it.")
         return ("Ollama isn't installed. Use Run local AI setup to install it, "
                 "or keep using rule-based mode.")
-
-    def _status_detail(self):
-        """A sentence naming the exact local-AI state and its next action."""
-        health = ollama_runtime.readiness(
-            self.settings.get("ollama_model", "llama3.2:3b"))
-        return self._detail_for_health(health)
 
     def _recheck_ai(self):
         """Start the server if needed and re-probe, off the UI thread.
@@ -189,7 +191,7 @@ class SettingsScreen(Screen):
         model = self.settings.get("ollama_model", "llama3.2:3b")
 
         class _Probe(QObject):
-            done = Signal(str)
+            done = Signal(object)   # the readiness() health dict, or None on timeout
 
             def run(self):
                 # A hard wall-clock cap: whatever any single network call does,
@@ -198,11 +200,11 @@ class SettingsScreen(Screen):
                 # thread with a watchdog that reports a timeout result.
                 import threading
 
-                result = {"finished": False}
+                result = {"health": None, "finished": False}
 
                 def probe():
                     try:
-                        ollama_runtime.ensure_ready(model)
+                        result["health"] = ollama_runtime.ensure_ready(model)
                     except Exception:
                         pass
                     result["finished"] = True
@@ -210,10 +212,7 @@ class SettingsScreen(Screen):
                 worker = threading.Thread(target=probe, daemon=True)
                 worker.start()
                 worker.join(timeout=45)
-                if not result["finished"]:
-                    self.done.emit("timeout")
-                else:
-                    self.done.emit("")
+                self.done.emit(result["health"] if result["finished"] else None)
 
         self._recheck_thread = QThread()
         self._recheck_probe = _Probe()
@@ -229,33 +228,38 @@ class SettingsScreen(Screen):
             self._recheck_button.setEnabled(False)
             self._recheck_button.setText("Checking…")
 
-    def _recheck_finished(self, status):
-        # Back on the UI thread (queued signal): update the status line.
-        if status == "timeout":
+    def _recheck_finished(self, health):
+        # Back on the UI thread (queued signal): apply the health the probe
+        # already gathered, rather than re-probing synchronously here.
+        if health is None:
             self._ai_detail.setText(
                 "Re-check timed out. Ollama may be busy or unresponsive. Make "
                 "sure Ollama is running (open it from the Start Menu), then try "
                 "again.")
         else:
-            self._ai_detail.setText(self._status_detail())
+            self._apply_health(health)
         if hasattr(self, "_recheck_button"):
             self._recheck_button.setEnabled(True)
             self._recheck_button.setText("Re-check / reconnect")
 
-    def _status_label(self):
-        """Live local-AI status, evaluated once when the screen builds."""
-        health = ollama_runtime.readiness(
-            self.settings.get("ollama_model", "llama3.2:3b"))
+    def _status_text_color(self, health):
+        """The status chip's text and colour for a readiness health dict."""
         if health["model_ready"]:
-            text, color = "● LOCAL MODEL RUNNING", P["good"]
-        elif health["running"]:
-            text, color = "● OLLAMA UP · MODEL MISSING", P["sevMedium"]
-        elif health["installed"]:
-            text, color = "● OLLAMA INSTALLED · STOPPED", P["sevMedium"]
-        else:
-            text, color = "● LOCAL AI NOT INSTALLED", P["text3"]
-        return w.label(text, size=9, weight=theme.W_SEMIBOLD, mono=True,
-                       color=color)
+            return "● LOCAL MODEL RUNNING", P["good"]
+        if health["running"]:
+            return "● OLLAMA UP · MODEL MISSING", P["sevMedium"]
+        if health["installed"]:
+            return "● OLLAMA INSTALLED · STOPPED", P["sevMedium"]
+        return "● LOCAL AI NOT INSTALLED", P["text3"]
+
+    def _status_label(self):
+        """A placeholder status chip. The real state is probed off-thread by
+        _refresh_ai_detail_async and applied in _apply_health, so building the
+        screen never blocks on an Ollama network call."""
+        self._status_lbl = w.label("● CHECKING LOCAL AI…", size=9,
+                                   weight=theme.W_SEMIBOLD, mono=True,
+                                   color=P["text3"])
+        return self._status_lbl
 
     def _open_setup_wizard(self):
         from ..setup_wizard import SetupWizard
