@@ -3,6 +3,7 @@ max_sentences: 5
 max_chars: 620
 min_chars: 120
 forbid: overview, summary of the data, the following, —, "**"
+forbid_opening: the output appears, here is, this section describes, based on the data provided
 ---
 FORMAT: Case overview paragraph.
 
@@ -16,6 +17,9 @@ Structure, in order:
 4. One clause noting any evidence of planning or intent, if present.
 
 Rules:
+- Open with what happened, not a description of the data. Never begin with
+  "The output appears", "Here is", "This section describes", or "Based on the
+  data provided".
 - Past tense, neutral investigator voice. State only what the evidence shows.
 - Name at least one exact filename and one exact timestamp from the evidence.
 - Never speculate about motive or name a person as guilty; attribute actions

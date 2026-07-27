@@ -2,6 +2,7 @@
 min_chars: 80
 max_chars: 1600
 forbid: as an ai, i cannot access, hypothetical, i don't have access, —, "**"
+forbid_opening: the output appears, here is, this section describes, based on the data provided
 ---
 FORMAT: "Ask the AI" case-scoped answer.
 
@@ -18,6 +19,9 @@ Structure:
    SOURCES: <comma-separated IDs, e.g. EV-01, F-03>
 
 Rules:
+- Lead with the answer itself. Never open with meta-commentary about the data
+  or the task ("The output appears", "Here is", "This section describes",
+  "Based on the data provided").
 - Cite only IDs that exist in the provided case data. An uncited claim is an
   opinion; prefer fewer claims with sources over more without.
 - Attribute actions to accounts, never to people ("the jcole account").
