@@ -12,9 +12,16 @@ anti-forensic indicator in its own right.
 
 class RuleEngine:
 
+    # Hard ceiling on findings from a single run. A pathological image (tens of
+    # thousands of deleted entries) could otherwise generate findings without
+    # bound, exploding both the report and memory. When the ceiling is reached
+    # we stop appending and add one honest note, so the cap is never silent.
+    MAX_FINDINGS = 500
+
     def run(self, disk_data, browser_data, unified_timeline):
 
         findings    = []
+        self._cap_noted = False
         disk_events = disk_data.get("events", [])
 
         # RULE 1 — Deleted user files
@@ -108,28 +115,75 @@ class RuleEngine:
                 })
 
         # RULE 7 — Deleted directory with live child entries
+        #
+        # Build a one-pass index of live (non-deleted) entries grouped by their
+        # immediate parent directory, then look up each deleted directory's
+        # children in O(1). The previous version scanned every event inside a
+        # loop over every deleted directory — O(n^2) — which hung on large
+        # images (50k events × thousands of deleted dirs = hundreds of millions
+        # of iterations). One finding is emitted per deleted directory, with a
+        # child count and a capped sample of paths, rather than one finding per
+        # child; details store paths only, never whole event dicts.
+        SAMPLE = 5
         deleted_dirs = [
             e for e in disk_events
             if "(deleted)" in e.get("path", "")
             and str(e.get("mode", "")).startswith("d/")
         ]
+
+        children_by_parent = {}
+        for e in disk_events:
+            path = e.get("path", "")
+            if not path or "(deleted)" in path:
+                continue
+            parent = path.rsplit("/", 1)[0] if "/" in path else ""
+            children_by_parent.setdefault(parent, []).append(path)
+
         for d in deleted_dirs:
-            live_base = d["path"].replace(" (deleted)", "")
-            for e in disk_events:
-                child = e.get("path", "")
-                if child.startswith(live_base + "/") and "(deleted)" not in child:
-                    self._safe_append(findings, {
-                        "type":      "deleted_directory_with_live_children",
-                        "severity":  3,
-                        "directory": d["path"],
-                        "child":     child,
-                        "timestamp": d.get("timestamp"),
-                        "reason":    "Deleted directory still has active child entries — possible incomplete deletion or anti-forensic activity.",
-                        "details":   {"directory": d, "child": e},
-                    })
+            live_base = d.get("path", "").replace(" (deleted)", "")
+            children = children_by_parent.get(live_base)
+            if not children:
+                continue
+            self._safe_append(findings, {
+                "type":        "deleted_directory_with_live_children",
+                "severity":    3,
+                "directory":   d.get("path"),
+                "timestamp":   d.get("timestamp"),
+                "child_count": len(children),
+                "reason": (
+                    f"Deleted directory still has {len(children)} active child "
+                    f"entr{'y' if len(children) == 1 else 'ies'} — possible "
+                    f"incomplete deletion or anti-forensic activity."
+                ),
+                "details": {
+                    "directory":    d.get("path"),
+                    "artifact":     d.get("artifact"),
+                    "child_count":  len(children),
+                    "child_sample": children[:SAMPLE],
+                },
+            })
 
         return findings
 
     def _safe_append(self, lst, item):
-        if isinstance(item, dict):
+        """Append a finding, but never past MAX_FINDINGS. On reaching the cap,
+        add a single honest note and drop the rest, so a runaway image cannot
+        explode the findings list."""
+        if not isinstance(item, dict):
+            return
+        if len(lst) < self.MAX_FINDINGS:
             lst.append(item)
+            return
+        if not self._cap_noted:
+            self._cap_noted = True
+            lst.append({
+                "type":     "findings_capped",
+                "severity": 2,
+                "reason": (
+                    f"The {self.MAX_FINDINGS}-finding limit was reached; further "
+                    f"matches were suppressed so the report and memory stay "
+                    f"bounded on very large images. Review the timeline for the "
+                    f"remaining activity."
+                ),
+                "details": {"limit": self.MAX_FINDINGS},
+            })
