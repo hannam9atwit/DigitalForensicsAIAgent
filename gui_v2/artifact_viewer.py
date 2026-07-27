@@ -140,9 +140,17 @@ def _unsupported(note: str, supported: bool = False, error: bool = False) -> dic
             "error": note if error else "", "supported": supported}
 
 
+# The rendered view only shows the first 500 rows, so it reads only a few
+# thousand packets. A pure-Python decode holds the GIL; reading the pipeline's
+# full 50k here would freeze the UI even though the parse is off-thread. This is
+# enough to fill the table on any real capture and returns in well under a
+# second. The full analysis pass keeps the larger default cap.
+_VIEW_PACKET_CAP = 2000
+
+
 def _render_network(path, log):
     from modules.network.pcap_parser import PCAPParser
-    result = PCAPParser().parse(path)
+    result = PCAPParser().parse(path, max_packets=_VIEW_PACKET_CAP)
     if result.get("error") and not result.get("events"):
         return _unsupported(result["error"], supported=True, error=True)
 
@@ -155,9 +163,16 @@ def _render_network(path, log):
             event.get("proto", ""),
             _port_pair(event.get("sport"), event.get("dport")),
         ])
-    note = f"{result.get('packets', 0)} packets read"
+
+    packets = result.get("packets", 0)
+    if result.get("truncated"):
+        note = (f"First {packets:,} packets read — this capture is large, so the "
+                f"preview is capped for responsiveness (the full analysis reads "
+                f"more)")
+    else:
+        note = f"{packets:,} packets read"
     if len(rows) == 500:
-        note += " (showing first 500)"
+        note += "; showing first 500"
     return {"columns": ["Time", "Source", "Destination", "Proto", "Ports"],
             "rows": rows, "note": note, "error": "", "supported": True}
 
@@ -270,45 +285,96 @@ def _run_fls(runner, path):
     """Run fls, handling both single-volume images and full disk images.
 
     A full disk image has a partition table, so fls must be told the
-    filesystem's byte offset with -o; run against the whole image it fails with
-    "Cannot determine file system type". So: try the image directly first
-    (works for single-volume/partition images), and if that fails, use mmls to
-    find partitions and retry fls at each filesystem partition's offset.
+    filesystem's SECTOR offset with -o (fls -o counts sectors, not bytes); run
+    against the whole image it fails with "Cannot determine file system type".
 
-    Returns (entries, error_message).
+    Attempts, in order:
+      1. fls directly — works for single-volume/partition images.
+      2. fls -o <offset> using core.partition_detector.detect_ntfs_offset —
+         the exact partition-offset path the analysis pipeline used to read this
+         image (it returns the NTFS start in sectors, e.g. 65664), so an image
+         that analysed successfully browses successfully too.
+      3. fls -o <sector> at every filesystem partition mmls reports — covers
+         non-NTFS filesystems detect_ntfs_offset skips.
+
+    Returns (entries, error_message). On failure the message carries the
+    complete stderr from every attempt, never a fragment.
     """
+    from core.partition_detector import detect_ntfs_offset
+
+    attempts = []  # (label, result) — kept so the error shows full stderr
+
     # Attempt 1: image is a single filesystem (no partition table).
-    result = runner.run_tsk(["fls", "-r", "-p", path], image_path=path)
-    if result.get("returncode") == 0 and result.get("stdout", "").strip():
-        return _parse_fls(result["stdout"]), ""
+    direct = runner.run_tsk(["fls", "-r", "-p", path], image_path=path)
+    if direct.get("returncode") == 0 and direct.get("stdout", "").strip():
+        return _parse_fls(direct["stdout"]), ""
+    attempts.append(("fls (no offset)", direct))
 
-    direct_stderr = (result.get("stderr") or "").strip()
+    # Attempt 2: the pipeline's partition-offset path — detect the NTFS start in
+    # sectors and pass it straight to fls -o (NOT multiplied to bytes).
+    detected = 0
+    try:
+        detected = detect_ntfs_offset(path)
+    except Exception as error:  # detection must never crash the viewer
+        attempts.append(("detect_ntfs_offset",
+                         {"stderr": str(error), "returncode": -1}))
+    if detected:
+        at_offset = runner.run_tsk(
+            ["fls", "-r", "-p", "-o", str(detected), path], image_path=path)
+        if at_offset.get("returncode") == 0 and at_offset.get("stdout", "").strip():
+            return _parse_fls(at_offset["stdout"]), ""
+        attempts.append((f"fls -o {detected}", at_offset))
 
-    # Attempt 2: full disk image — locate partitions with mmls, then fls -o.
+    # Attempt 3: enumerate every filesystem partition with mmls and try each
+    # (sector offsets). Skips the offset already tried in attempt 2.
     mmls = runner.run_tsk(["mmls", path], image_path=path)
     if mmls.get("returncode") == 0:
-        offsets = _parse_mmls_offsets(mmls.get("stdout", ""))
-        for offset in offsets:
+        for sector in _parse_mmls_offsets(mmls.get("stdout", "")):
+            if sector == detected:
+                continue
             part = runner.run_tsk(
-                ["fls", "-r", "-p", "-o", str(offset), path], image_path=path)
+                ["fls", "-r", "-p", "-o", str(sector), path], image_path=path)
             if part.get("returncode") == 0 and part.get("stdout", "").strip():
                 return _parse_fls(part["stdout"]), ""
+            attempts.append((f"fls -o {sector}", part))
+    else:
+        attempts.append(("mmls", mmls))
 
-    # Both paths failed — report the most useful reason.
-    stderr = direct_stderr or (mmls.get("stderr") or "").strip()
+    return [], _fls_error(attempts)
+
+
+def _fls_error(attempts):
+    """Compose a browse-failure message that preserves the COMPLETE stderr from
+    every attempt, so it is never cut off mid-sentence."""
+    details = []
+    combined = ""
+    for label, result in attempts:
+        stderr = (result.get("stderr") or "").strip()
+        if stderr:
+            details.append(f"{label}: {stderr}")
+            combined += " " + stderr.lower()
+
+    body = (" | ".join(details) if details
+            else "no filesystem was found and no error text was returned")
+
     hint = ""
-    if "not found" in stderr.lower() or "tool not found" in stderr.lower():
+    if "not found" in combined or "tool not found" in combined:
         hint = (" SleuthKit binaries are needed to browse disk images; they "
                 "ship with the installer in bin/sleuthkit.")
-    elif "cannot determine" in stderr.lower() or not stderr:
+    elif "cannot determine" in combined or not details:
         hint = (" The image may be encrypted, use an unsupported filesystem, or "
                 "be a container format this build doesn't mount.")
-    return [], f"fls could not read this image: {stderr or 'no filesystem found'}{hint}"
+    return f"fls could not read this image. {body}.{hint}"
 
 
 def _parse_mmls_offsets(output):
-    """Extract filesystem partition start sectors from mmls output, as byte
-    offsets (mmls reports 512-byte sectors)."""
+    """Filesystem partition start SECTORS from mmls output.
+
+    fls -o expects a sector offset, so these are passed through unchanged — the
+    earlier code multiplied by 512 to make a byte offset, which fls then read as
+    a sector number far past the end of the image, so every offset attempt
+    failed even when the partition was found.
+    """
     offsets = []
     for line in output.splitlines():
         parts = line.split()
@@ -319,10 +385,9 @@ def _parse_mmls_offsets(output):
                    ("unallocated", "meta", "primary table", "extended")):
                 continue
             try:
-                start_sector = int(parts[2])
+                offsets.append(int(parts[2]))  # start sector, as fls -o wants
             except ValueError:
                 continue
-            offsets.append(start_sector * 512)
     return offsets
 
 

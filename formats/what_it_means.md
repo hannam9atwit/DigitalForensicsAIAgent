@@ -3,6 +3,7 @@ max_sentences: 2
 max_chars: 260
 min_chars: 30
 forbid: this event, this row, the data shows, —, "**"
+forbid_opening: the output appears, here is, this section describes, based on the data provided
 ---
 FORMAT: Evidence / timeline "what it means" note.
 
@@ -11,7 +12,9 @@ artifact or timeline event. State what the artifact tells the investigation —
 a forensic conclusion, not a description of the record.
 
 Rules:
-- Lead with the conclusion, not the artifact type.
+- Lead with the conclusion, not the artifact type — and never with
+  meta-commentary ("The output appears", "Here is", "This section describes",
+  "Based on the data provided").
 - If the artifact is routine system noise, say so plainly and why.
 - Name the significance tier implicitly through word choice — "planning
   indicator", "routine", "central event" — never as a label.

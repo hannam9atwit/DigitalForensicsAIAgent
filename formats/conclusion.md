@@ -3,6 +3,7 @@ max_sentences: 6
 max_chars: 800
 min_chars: 120
 forbid: in conclusion, to conclude, wrapping up, —, "**"
+forbid_opening: the output appears, here is, this section describes, based on the data provided
 ---
 FORMAT: Report conclusion narrative.
 
@@ -11,6 +12,9 @@ collectively suggests, how the findings relate, and the confidence in that
 assessment with its basis. Written for examiner review.
 
 Rules:
+- Open with the overall read of the evidence, never with meta-commentary
+  ("The output appears", "Here is", "This section describes", "Based on the
+  data provided").
 - Calibrated language: "consistent with", "indicates", never certainty the
   evidence doesn't support.
 - Reference finding IDs when anchoring claims.

@@ -36,51 +36,62 @@ _PCAP_MAGICS = {
 }
 _PCAPNG_MAGIC = 0x0A0D0D0A
 
-_MAX_PACKETS = 50_000  # cap so a huge capture can't stall the pipeline
+# Default cap for the full analysis pipeline: high enough to characterise a
+# capture, bounded so a huge one can't run unbounded. Interactive callers (the
+# evidence viewer) pass a much smaller cap — a pure-Python decode loop holds the
+# GIL, so reading tens of thousands of packets stalls the UI even off-thread;
+# the rendered view only shows a few hundred rows, so it reads only a few
+# thousand packets and returns in well under a second.
+_MAX_PACKETS = 50_000
 
 _PROTO_NAMES = {6: "TCP", 17: "UDP", 1: "ICMP"}
 
 
 class PCAPParser:
-    def parse(self, path: str) -> dict:
+    def parse(self, path: str, max_packets: int = _MAX_PACKETS) -> dict:
         if not path:
-            return {"events": [], "packets": 0, "error": "no file path given"}
+            return {"events": [], "packets": 0, "truncated": False,
+                    "error": "no file path given"}
 
         try:
             with open(path, "rb") as capture:
                 header = capture.read(4)
                 if len(header) < 4:
-                    return {"events": [], "packets": 0,
+                    return {"events": [], "packets": 0, "truncated": False,
                             "error": "file too short to be a capture"}
                 magic = struct.unpack("<I", header)[0]
                 magic_be = struct.unpack(">I", header)[0]
 
                 if magic in _PCAP_MAGICS or magic_be in _PCAP_MAGICS:
-                    return self._parse_classic(path)
+                    return self._parse_classic(path, max_packets)
                 if magic == _PCAPNG_MAGIC or magic_be == _PCAPNG_MAGIC:
-                    return self._parse_pcapng(path)
-                return {"events": [], "packets": 0,
+                    return self._parse_pcapng(path, max_packets)
+                return {"events": [], "packets": 0, "truncated": False,
                         "error": "not a recognized pcap/pcapng file"}
         except OSError as error:
-            return {"events": [], "packets": 0, "error": f"cannot read file: {error}"}
+            return {"events": [], "packets": 0, "truncated": False,
+                    "error": f"cannot read file: {error}"}
 
     # ── dpkt path (used by both classic and pcapng when available) ────────────
 
-    def _parse_with_dpkt(self, path: str) -> dict:
+    def _parse_with_dpkt(self, path: str, max_packets: int) -> dict:
         import dpkt
 
         events = []
         packet_count = 0
+        truncated = False
         with open(path, "rb") as capture:
             reader = dpkt.pcap.Reader(capture)
             for timestamp, buffer in reader:
                 packet_count += 1
-                if packet_count > _MAX_PACKETS:
-                    break
                 event = self._event_from_dpkt(dpkt, timestamp, buffer)
                 if event:
                     events.append(event)
-        return {"events": events, "packets": packet_count, "error": ""}
+                if packet_count >= max_packets:
+                    truncated = True
+                    break
+        return {"events": events, "packets": packet_count,
+                "truncated": truncated, "error": ""}
 
     def _event_from_dpkt(self, dpkt, timestamp, buffer):
         try:
@@ -99,20 +110,22 @@ class PCAPParser:
 
     # ── pure-stdlib classic pcap path ─────────────────────────────────────────
 
-    def _parse_classic(self, path: str) -> dict:
+    def _parse_classic(self, path: str, max_packets: int) -> dict:
         # Prefer dpkt if it is importable — richer and battle-tested.
         try:
             import dpkt  # noqa: F401
-            return self._parse_with_dpkt(path)
+            return self._parse_with_dpkt(path, max_packets)
         except ImportError:
             pass
 
         events = []
         packet_count = 0
+        truncated = False
         with open(path, "rb") as capture:
             global_header = capture.read(24)
             if len(global_header) < 24:
-                return {"events": [], "packets": 0, "error": "truncated pcap header"}
+                return {"events": [], "packets": 0, "truncated": False,
+                        "error": "truncated pcap header"}
 
             magic = struct.unpack("<I", global_header[:4])[0]
             endian, time_divisor = _PCAP_MAGICS.get(
@@ -131,15 +144,16 @@ class PCAPParser:
                     break
 
                 packet_count += 1
-                if packet_count > _MAX_PACKETS:
-                    break
-
                 timestamp = ts_sec + ts_frac / time_divisor
                 event = self._event_from_bytes(payload, link_type, timestamp)
                 if event:
                     events.append(event)
+                if packet_count >= max_packets:
+                    truncated = True
+                    break
 
-        return {"events": events, "packets": packet_count, "error": ""}
+        return {"events": events, "packets": packet_count,
+                "truncated": truncated, "error": ""}
 
     def _event_from_bytes(self, data, link_type, timestamp):
         # link_type 1 = Ethernet; 101 = raw IP. Only these two are decoded by
@@ -174,12 +188,12 @@ class PCAPParser:
         proto = _PROTO_NAMES.get(protocol, str(protocol))
         return self._make_event(timestamp, src, dst, proto, sport, dport)
 
-    def _parse_pcapng(self, path: str) -> dict:
+    def _parse_pcapng(self, path: str, max_packets: int) -> dict:
         try:
             import dpkt  # noqa: F401
-            return self._parse_with_dpkt(path)
+            return self._parse_with_dpkt(path, max_packets)
         except ImportError:
-            return {"events": [], "packets": 0,
+            return {"events": [], "packets": 0, "truncated": False,
                     "error": ("pcapng format needs the 'dpkt' package, which "
                               "isn't installed. Convert to classic pcap or "
                               "install dpkt for pcapng support.")}
