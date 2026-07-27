@@ -136,7 +136,8 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     """
     evidence_list: list of dicts each with "_path" and "kind".
     ai_config: the user's engine choice from Settings (provider/model/api_key).
-    Returns {events, findings, anomalies, narrative, pipeline}.
+    Returns {events, findings, anomalies, narrative, pipeline}, where narrative
+    is {"markdown": <text>, "ai_status": <who-drafted-it record>}.
     """
     import time
     t0 = time.time()
@@ -229,22 +230,33 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     except Exception:
         pass
 
-    # narrative
-    narrative = ""
+    # narrative — carries both the drafted text and an honest record of who
+    # drafted it (the local model, or the rule-based fallback and why).
+    narrative_md = ""
+    ai_status = None
     try:
         from ai.narrative_engine import NarrativeEngine
-        narrative = NarrativeEngine(ai_config).generate({
+        engine = NarrativeEngine(ai_config)
+        narrative_md = engine.generate({
             "findings": findings, "anomalies": anomalies,
             "timeline": {"events": all_events}, "browser": {},
             "summary": {"finding_count": len(findings), "anomaly_count": len(anomalies)},
         })
+        ai_status = engine.ai_status
     except Exception as e:
         log(f"[~] narrative generation skipped: {e}")
+        ai_status = {"used_llm": False, "provider": "", "model": "",
+                     "reason": "narrative generation failed", "detail": str(e)}
+
+    if ai_status and ai_status.get("used_llm"):
+        log(f"[+] Narrative drafted by {ai_status.get('model')}")
+    elif ai_status:
+        log(f"[~] Narrative rule-based — AI unavailable: {ai_status.get('reason')}")
 
     dur = time.time() - t0
     return {
         "events": all_events, "findings": findings, "anomalies": anomalies,
-        "narrative": narrative,
+        "narrative": {"markdown": narrative_md, "ai_status": ai_status},
         "parserStatus": parser_status,
         "pipeline": {
             "lastRun": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

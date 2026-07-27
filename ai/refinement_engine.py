@@ -17,12 +17,26 @@ fallback when the spec file is absent.
 
 import os
 import json
+import queue
+import socket
 import datetime
+import threading
+import urllib.error
 import urllib.request
 from collections import Counter
 
 from ai import format_library
 from core import ollama_runtime
+
+
+class GenerationCancelled(Exception):
+    """Raised out of refine() when cancel() was called mid-draft.
+
+    It signals a deliberate teardown, not a failure: the caller must leave any
+    existing narrative untouched rather than write the partial one, so this is
+    caught separately from the section-level errors that degrade to rule-based
+    text.
+    """
 
 
 # Shared persona prepended to every LLM call
@@ -67,17 +81,82 @@ class RefinementEngine:
         self.anthropic_api_key = (config.get("api_key")
                                   or os.environ.get("ANTHROPIC_API_KEY", ""))
 
+        # Records who drafted the report and, when the model did not, why. The
+        # deterministic fallback used to announce itself only on the console;
+        # this attribute carries the same truth up to the result and the UI.
+        # Populated by refine(); this is the honest state until it runs.
+        self.ai_status = self._status(False, reason="analysis has not been run")
+
+        # Set by cancel() to unwind an in-flight refine(). Checked between
+        # sections so a torn-down UI stops promptly without joining the section
+        # workers (which may be mid-request) at interpreter exit.
+        self._abort = threading.Event()
+
+    def cancel(self):
+        """Ask an in-flight refine() to stop. Safe from any thread and
+        idempotent: the section loop checks this between sections and raises
+        GenerationCancelled, so no partial report is ever returned."""
+        self._abort.set()
+
+    @staticmethod
+    def _status(used_llm: bool, provider: str = "", model: str = "",
+                reason: str = "", detail: str = "", degraded=None) -> dict:
+        """The one shape every layer above reads: did the model draft this, and
+        if not, the plain-English reason plus the raw exception text.
+
+        `degraded` lists the section names the model failed or timed out on and
+        that fell back to rule-based text — an empty list when the model drafted
+        every section cleanly.
+        """
+        return {
+            "used_llm": used_llm,
+            "provider": provider,
+            "model":    model,
+            "reason":   reason,
+            "detail":   detail,
+            "degraded": list(degraded) if degraded else [],
+        }
+
     # ── Public entry point ────────────────────────────────────────────────────
 
-    def refine(self, raw_narrative: str, analysis: dict = None) -> str:
+    def refine(self, raw_narrative: str, analysis: dict = None,
+               on_progress=None, section_timeout: int = 180) -> str:
+        """Draft the report, section by section, from `analysis`.
+
+        on_progress(section_name, done, total): called on the calling thread as
+        each section finishes, so a UI can show "Generating report… 4 of 10"
+        instead of a frozen window.
+
+        section_timeout: per-section wall-clock cap. A section that exceeds it
+        (or errors) degrades to rule-based text rather than sinking the whole
+        report; which sections degraded is recorded in ai_status["degraded"].
+
+        Raises GenerationCancelled if cancel() is called mid-draft, so a caller
+        tearing down its UI can discard the run and keep the prior narrative.
+        """
         if analysis is None:
+            self.ai_status = self._status(
+                False, reason="no structured analysis was supplied")
             return self._deterministic_format(raw_narrative)
 
-        use_ollama    = self.provider != "anthropic" and self._ollama_available()
+        if self.provider == "anthropic":
+            use_ollama, ollama_reason, ollama_detail = False, "", ""
+        else:
+            use_ollama, ollama_reason, ollama_detail = self._ollama_status()
         use_anthropic = (not use_ollama) and bool(self.anthropic_api_key)
 
         if not use_ollama and not use_anthropic:
-            print("[~] No LLM available — using deterministic fallback")
+            if self.provider == "anthropic":
+                reason, detail = "no Anthropic API key is set", ""
+            else:
+                reason = ollama_reason or "no local model is available"
+                detail = ollama_detail
+            self.ai_status = self._status(
+                False, provider=self.provider, model=self.OLLAMA_MODEL,
+                reason=reason, detail=detail)
+            print(f"[~] No LLM available ({reason}) — using deterministic fallback")
+            if detail:
+                print(f"    ↳ {detail}")
             return self._deterministic_format(raw_narrative)
 
         ctx = self._build_context(analysis)
@@ -95,26 +174,86 @@ class RefinementEngine:
             ("## 10. Conclusion",              self._prompt_conclusion),
         ]
 
-        parts = []
-        for heading, prompt_fn in sections:
-            print(f"[*] Generating: {heading}")
-            prompt = prompt_fn(ctx)
+        provider = "anthropic" if use_anthropic else "ollama"
+        model    = self.ANTHROPIC_MODEL if use_anthropic else self.OLLAMA_MODEL
+        call     = self._call_anthropic if use_anthropic else self._call_ollama
+        total    = len(sections)
+
+        # Run the section calls concurrently rather than back-to-back. On a
+        # local 3B model the old sequential loop took 5–10 minutes and made the
+        # window look frozen.
+        #
+        # These are raw daemon threads, deliberately NOT a ThreadPoolExecutor:
+        # the executor registers its workers for an atexit join, so a worker
+        # stuck in a request would block interpreter exit for up to the section
+        # timeout when the app is closed mid-draft. Daemon threads simply die
+        # with the process. Concurrency is capped by the worker count — enough
+        # to overlap the network waits, not so many that we starve the CPU the
+        # model needs. Output order is restored by index below; a section that
+        # times out or errors degrades to rule-based text so one slow section
+        # never sinks the whole report.
+        results  = [None] * total
+        degraded = []
+
+        def draft(index: int) -> str:
+            heading, prompt_fn = sections[index]
+            return self._strip_preamble(
+                call(prompt_fn(ctx), timeout=section_timeout))
+
+        work_q = queue.Queue()
+        for i in range(total):
+            work_q.put(i)
+        done_q = queue.Queue()   # (index, ok, value_or_exception)
+
+        def worker():
+            while not self._abort.is_set():
+                try:
+                    i = work_q.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    done_q.put((i, True, draft(i)))
+                except Exception as e:                       # noqa: BLE001
+                    done_q.put((i, False, e))
+
+        workers = min(3, total)
+        for n in range(workers):
+            threading.Thread(target=worker, daemon=True,
+                             name=f"section-{n}").start()
+
+        # Drain completions on this thread, polling so the abort flag is seen
+        # promptly even while every worker is blocked in a request.
+        done = 0
+        while done < total:
+            if self._abort.is_set():
+                raise GenerationCancelled()
             try:
-                if use_ollama:
-                    text = self._call_ollama(prompt)
-                elif use_anthropic:
-                    text = self._call_anthropic(prompt)
-                else:
-                    text = "*(Section unavailable — no LLM configured)*"
+                i, ok, payload = done_q.get(timeout=0.3)
+            except queue.Empty:
+                continue
+            name = self._section_name(sections[i][0])
+            if ok:
+                results[i] = payload
+            else:
+                print(f"[!] Section '{name}' fell back to rule-based: {payload}")
+                results[i] = self._fallback_section(sections[i][0], ctx)
+                degraded.append(name)
+            done += 1
+            if on_progress:
+                on_progress(name, done, total)
 
-                text = self._strip_preamble(text)
+        parts = [f"{sections[i][0]}\n\n{(results[i] or '').strip()}"
+                 for i in range(total)]
 
-            except Exception as e:
-                print(f"[!] LLM failed for {heading}: {e}")
-                text = f"*Section could not be generated: {e}*"
-
-            parts.append(f"{heading}\n\n{text.strip()}")
-
+        if degraded:
+            reason = (f"{len(degraded)} of {total} section(s) timed out and were "
+                      f"drafted rule-based")
+            detail = ", ".join(degraded)
+        else:
+            reason, detail = "", ""
+        self.ai_status = self._status(
+            True, provider=provider, model=model,
+            reason=reason, detail=detail, degraded=degraded)
         return "\n\n---\n\n".join(parts)
 
     # ── LLM callers ───────────────────────────────────────────────────────────
@@ -125,7 +264,7 @@ class RefinementEngine:
         spec = format_library.load(format_library.SURFACE_REPORT_SECTION)
         return spec.prompt_text if spec else _FEW_SHOT
 
-    def _call_ollama(self, prompt: str) -> str:
+    def _call_ollama(self, prompt: str, timeout: int = 300) -> str:
         full_prompt = (f"{_PERSONA}\n\n{self._section_format_text()}\n\n"
                        f"{prompt}\n\nREPORT TEXT:")
 
@@ -144,7 +283,7 @@ class RefinementEngine:
             self.OLLAMA_URL, data=payload,
             headers={"Content-Type": "application/json"}, method="POST")
 
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode())
 
         text = body.get("response", "").strip()
@@ -152,7 +291,7 @@ class RefinementEngine:
             raise ValueError("Ollama returned empty response")
         return text
 
-    def _call_anthropic(self, prompt: str) -> str:
+    def _call_anthropic(self, prompt: str, timeout: int = 60) -> str:
         full_prompt = f"{self._section_format_text()}\n\n{prompt}\n\nREPORT TEXT:"
 
         payload = json.dumps({
@@ -170,7 +309,7 @@ class RefinementEngine:
                 "anthropic-version": "2023-06-01",
             }, method="POST")
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode())
 
         texts = [b["text"] for b in body.get("content", []) if b.get("type") == "text"]
@@ -178,21 +317,138 @@ class RefinementEngine:
             raise ValueError("Anthropic returned no text")
         return "\n".join(texts)
 
-    def _ollama_available(self) -> bool:
-        """True when the server runs and can serve the configured model.
-        If the exact model is absent but another tag of its base is present,
-        use what's there rather than failing the whole report."""
+    # ── Per-section rule-based fallback ─────────────────────────────────────────
+
+    @staticmethod
+    def _section_name(heading: str) -> str:
+        """'## 3. Critical Findings' -> 'Critical Findings', for progress and
+        the degraded-section list."""
+        text = heading.lstrip("# ").strip()
+        if "." in text.split(" ", 1)[0]:
+            text = text.split(".", 1)[1].strip()
+        return text or heading.strip()
+
+    def _fallback_section(self, heading: str, ctx: dict) -> str:
+        """A rule-based rendering of one section, for when the model times out
+        or errors on it.
+
+        It states the same structured facts the prompt would have handed the
+        model, so the section stays truthful — just plainer — and is prefixed so
+        the reader knows the model did not write it. This is what keeps one slow
+        section from taking the whole report down with it.
+        """
+        s = ctx["summary"]
+        b = ctx["browser"]
+        marker = "*(Rule-based — the model did not return this section in time.)*"
+        name = self._section_name(heading)
+
+        def plural(n, one, many):
+            return one if n == 1 else many
+
+        if name.startswith("Executive Summary"):
+            body = (f"The examination recovered {s['total_events']} filesystem "
+                    f"events and produced {s['critical_count']} critical/high and "
+                    f"{s['supporting_count']} lower-severity finding(s), with "
+                    f"{s['anomaly_count']} "
+                    f"{plural(s['anomaly_count'], 'anomaly', 'anomalies')} detected. "
+                    f"{s['wiped_records']} record(s) show wiped MFT metadata.")
+        elif name.startswith("Investigative Context"):
+            body = (f"A disk image was processed with SleuthKit and merged into a "
+                    f"unified timeline of {s['total_events']} events "
+                    f"({s['user_events']} user-relevant). Browser data: "
+                    f"{b['visit_count']} visit(s), {b['download_count']} download(s).")
+        elif name.startswith("Critical Findings"):
+            lines = ctx["critical_findings"] or [
+                "No critical or high severity findings were identified."]
+            body = "\n".join(f"- {x}" for x in lines)
+        elif name.startswith("Supporting Findings"):
+            lines = ctx["supporting_findings"] or [
+                "No medium or low severity findings were identified."]
+            body = "\n".join(f"- {x}" for x in lines)
+        elif name.startswith("Anomaly Analysis"):
+            lines = ctx["anomalies"] or ["No anomalies were detected."]
+            body = "\n".join(f"- {x}" for x in lines)
+        elif name.startswith("Timeline"):
+            lines = ctx["timeline_lines"][:20] or [
+                "No user-relevant timeline events with valid timestamps were "
+                "recovered — itself consistent with MFT metadata wiping."]
+            body = "\n".join(f"- {x}" for x in lines)
+        elif name.startswith("Anti-Forensic"):
+            body = (f"{s['wiped_records']} record(s) have fully zeroed MFT "
+                    f"timestamps and size, consistent with metadata wiping. See "
+                    f"the critical findings above for corroborating indicators.")
+        elif name.startswith("Browser"):
+            body = ((f"{b['visit_count']} visit(s), {b['download_count']} "
+                     f"download(s) and {b['cookie_count']} cookie(s) were parsed.")
+                    if (b["visit_count"] or b["download_count"])
+                    else "No browser artefacts were available for analysis.")
+        elif name.startswith("Evidence Preservation"):
+            body = ("Preserve the disk image read-only, recover flagged items with "
+                    "SleuthKit `icat`, and hash every extracted artefact before "
+                    "further analysis.")
+        elif name.startswith("Conclusion"):
+            body = (f"The evidence yielded {s['critical_count']} critical finding(s) "
+                    f"and {s['anomaly_count']} "
+                    f"{plural(s['anomaly_count'], 'anomaly', 'anomalies')}; "
+                    f"{s['wiped_records']} wiped record(s) were observed. The "
+                    f"supporting detail is in the findings above.")
+        else:
+            body = ("The underlying facts for this section are available in the "
+                    "Findings and Timeline tabs.")
+        return f"{marker}\n\n{body}"
+
+    def _ollama_status(self) -> tuple[bool, str, str]:
+        """(available, reason, detail) for the local backend.
+
+        The availability decision still defers entirely to core.ollama_runtime —
+        the single authority — so this does NOT change when the fallback fires.
+        It only recovers *why* it fired, in words the examiner can act on, plus
+        the underlying exception for the audit trail.
+
+        If the exact model is absent but another tag is present, use what's
+        there rather than failing the whole report (behaviour unchanged).
+        """
         if not ollama_runtime.server_running():
-            return False
+            reason, detail = self._ollama_probe_failure()
+            return False, reason, detail
         if ollama_runtime.model_available(self.OLLAMA_MODEL):
-            return True
+            return True, "", ""
 
         models = ollama_runtime.installed_models()
         if models:
             self.OLLAMA_MODEL = models[0]
             print(f"[~] Configured model unavailable — using {self.OLLAMA_MODEL}")
-            return True
-        return False
+            return True, "", ""
+
+        return (False, "no model is installed in Ollama",
+                f"the server is running but has no models; expected "
+                f"{self.OLLAMA_MODEL}")
+
+    def _ollama_probe_failure(self) -> tuple[str, str]:
+        """Name the reason the local server is unreachable.
+
+        server_running() already collapsed the failure to a bool; this repeats
+        the probe once so the specific exception can be recovered and the report
+        can tell "not running" apart from a timeout or a connection error.
+        """
+        tags_url = f"{ollama_runtime.OLLAMA_HOST}/api/tags"
+        try:
+            req = urllib.request.Request(tags_url, method="GET")
+            with urllib.request.urlopen(req, timeout=4):
+                # It answered on the retry: the first negative was a transient
+                # blip, not a down server.
+                return "Ollama server is not running", ""
+        except urllib.error.URLError as e:
+            inner = getattr(e, "reason", e)
+            if isinstance(inner, (socket.timeout, TimeoutError)):
+                return "the Ollama server did not respond in time (timeout)", str(e)
+            if isinstance(inner, ConnectionRefusedError):
+                return "Ollama server is not running", str(inner)
+            return "cannot reach the Ollama server (connection error)", str(e)
+        except (socket.timeout, TimeoutError) as e:
+            return "the Ollama server did not respond in time (timeout)", str(e)
+        except OSError as e:
+            return "cannot reach the Ollama server (connection error)", str(e)
 
     # ── Preamble stripper ─────────────────────────────────────────────────────
 

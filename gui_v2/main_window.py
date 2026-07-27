@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
 
         self.builder = None
         self.case = empty_case()
+        self._bg_task = None
 
         from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
@@ -282,6 +283,7 @@ class MainWindow(QMainWindow):
 
         self.screens["settings"].changed.connect(self._settings_changed)
         self.screens["report"].export_requested.connect(self.export_report)
+        self.screens["report"].narrative_updated.connect(self._narrative_regenerated)
         self.screens["chat"].asked.connect(self._log_question)
 
         self._refresh_sidebar()
@@ -301,6 +303,19 @@ class MainWindow(QMainWindow):
         ai_config = self._ai_config()
         for screen in self.screens.values():
             screen.ai_config = ai_config
+
+    def _narrative_regenerated(self, payload):
+        """The report screen re-drafted the narrative. Fold it into the cached
+        analysis and re-save, so the fresh draft survives a reopen rather than
+        being lost the moment the examiner leaves the tab."""
+        if self.builder and isinstance(self.builder.analysis, dict):
+            self.builder.analysis["narrative"] = payload
+            try:
+                from .case_store import save_case
+                save_case(self.builder)
+            except Exception:
+                pass
+        self.statusBar().showMessage("Narrative re-drafted", 4000)
 
     def show_analyzing(self):
         self._clear_stack()
@@ -424,17 +439,28 @@ class MainWindow(QMainWindow):
         dlg = IntakeDialog(self, self.settings)
         if not dlg.exec():
             return
-        prog = self._progress("Hashing evidence on intake…")
-        try:
-            self.builder = dlg.build(log=lambda m: self.statusBar().showMessage(m))
-        finally:
-            prog.close()
-        self.case = self.builder.to_case()
+        # Read the dialog's Qt fields here, on the UI thread; hash the files
+        # (the multi-GB, multi-minute part) off-thread so the window never
+        # freezes during intake.
+        builder = dlg.make_builder()
+        paths = dlg.file_paths()
+
+        def hash_files(progress):
+            for p in paths:
+                progress(f"Hashing {os.path.basename(p)}…")
+                builder.add_evidence(p)
+            return builder
+
+        self._run_bg("Hashing evidence on intake…", hash_files, self._new_case_hashed)
+
+    def _new_case_hashed(self, builder):
+        self.builder = builder
+        self.case = builder.to_case()
         self._enter_case()
         self.go("evidence")
         if QMessageBox.question(
                 self, "Run analysis",
-                f"{len(self.builder.evidence)} artifact(s) hashed and registered.\n"
+                f"{len(builder.evidence)} artifact(s) hashed and registered.\n"
                 "Run the full analysis pipeline now?") == QMessageBox.Yes:
             self.run_analysis()
 
@@ -447,13 +473,19 @@ class MainWindow(QMainWindow):
             self, "Add Evidence Files", "", EVIDENCE_FILTER)
         if not paths:
             return
-        prog = self._progress("Hashing evidence on intake…")
-        try:
+
+        builder = self.builder
+
+        def hash_files(progress):
             for p in paths:
-                self.statusBar().showMessage(f"Hashing {os.path.basename(p)}…")
-                self.builder.add_evidence(p)
-        finally:
-            prog.close()
+                progress(f"Hashing {os.path.basename(p)}…")
+                builder.add_evidence(p)
+            return None
+
+        self._run_bg("Hashing evidence on intake…", hash_files,
+                     lambda _: self._after_add_evidence())
+
+    def _after_add_evidence(self):
         self.case = self.builder.to_case()
         self._enter_case()
         self.go("evidence")
@@ -512,7 +544,17 @@ class MainWindow(QMainWindow):
         if not self.builder:
             QMessageBox.information(self, "No case", "Open a real case first.")
             return
-        results = self.builder.reverify()
+        # Re-hashing every registered image is the single heaviest blocker in
+        # the app; run it off-thread behind the progress dialog.
+        builder = self.builder
+
+        def reverify(progress):
+            progress("Re-hashing registered evidence…")
+            return builder.reverify()
+
+        self._run_bg("Re-verifying evidence hashes…", reverify, self._after_verify)
+
+    def _after_verify(self, results):
         self.case = self.builder.to_case()
         self._enter_case()
         self.go("evidence")
@@ -539,12 +581,17 @@ class MainWindow(QMainWindow):
 
     def _load_case_file(self, path):
         from .case_store import load_case
-        try:
-            self.builder = load_case(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Open failed", str(e))
-            return
-        self.case = self.builder.to_case()
+        # Unzipping and JSON-parsing a saved case (all events + findings) can
+        # take seconds for a large case; do it off-thread.
+        self._run_bg(
+            "Opening case…",
+            lambda progress: load_case(path),
+            self._case_loaded,
+            on_error=lambda msg: QMessageBox.critical(self, "Open failed", msg))
+
+    def _case_loaded(self, builder):
+        self.builder = builder
+        self.case = builder.to_case()
         self._enter_case()
         self.go("case" if self.case.get("findings") else "evidence")
         self.statusBar().showMessage(
@@ -564,6 +611,16 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".pdf"):
             path += ".pdf"
 
+        # The reportlab import is cheap; keep its specific "missing" guidance on
+        # the UI thread, then build the document (which loops over every event
+        # and writes the file) off-thread.
+        try:
+            from .report_pdf import generate_report
+        except ImportError:
+            QMessageBox.warning(self, "reportlab missing",
+                                "PDF reports need reportlab:\n\npip install reportlab")
+            return
+
         rep = self.screens.get("report")
         case_for_pdf = dict(self.case)
         if rep:
@@ -572,24 +629,15 @@ class MainWindow(QMainWindow):
             case_for_pdf["findings"] = rep.included_findings()
             case_for_pdf["examinerNotes"] = rep.notes
 
-        try:
-            from .report_pdf import generate_report
-            prog = self._progress("Building PDF report…")
-            try:
-                generate_report(case_for_pdf, path)
-            finally:
-                prog.close()
-        except ImportError:
-            QMessageBox.warning(self, "reportlab missing",
-                                "PDF reports need reportlab:\n\npip install reportlab")
-            return
-        except Exception as e:
-            QMessageBox.critical(self, "Report failed", str(e))
-            return
+        self._run_bg(
+            "Building PDF report…",
+            lambda progress: generate_report(case_for_pdf, path),
+            lambda _r: self._report_exported(path, rep, len(case_for_pdf["findings"])),
+            on_error=lambda msg: QMessageBox.critical(self, "Report failed", msg))
 
+    def _report_exported(self, path, rep, finding_count):
         self._audit("REPORT_EXPORTED",
-                    f"{os.path.basename(path)} · "
-                    f"{len(case_for_pdf['findings'])} findings included",
+                    f"{os.path.basename(path)} · {finding_count} findings included",
                     kind="user")
         if rep:
             rep.mark_exported(os.path.basename(path))
@@ -609,16 +657,20 @@ class MainWindow(QMainWindow):
         if not dest:
             return
         from .evidence_export import export_evidence
-        prog = self._progress("Copying & re-hashing evidence…")
-        try:
-            res = export_evidence(items, dest, self.case["caseMeta"],
-                                  log=lambda m: self.statusBar().showMessage(m))
-            self.builder._log("EVIDENCE_EXPORTED",
-                              f"{res['ok']}/{res['total']} artifact(s) exported to {dest}",
-                              who=self.settings.get("examiner") or "examiner")
-            self.case = self.builder.to_case()
-        finally:
-            prog.close()
+        meta = self.case["caseMeta"]
+        # Copying every original byte-for-byte and re-hashing each copy is
+        # ~2× the total evidence size in I/O; run it off-thread.
+        self._run_bg(
+            "Copying & re-hashing evidence…",
+            lambda progress: export_evidence(items, dest, meta, log=progress),
+            lambda res: self._evidence_exported(res, dest))
+
+    def _evidence_exported(self, res, dest):
+        self.builder._log(
+            "EVIDENCE_EXPORTED",
+            f"{res['ok']}/{res['total']} artifact(s) exported to {dest}",
+            who=self.settings.get("examiner") or "examiner")
+        self.case = self.builder.to_case()
         QMessageBox.information(
             self, "Export complete",
             f"Exported {res['ok']}/{res['total']} artifact(s).\n"
@@ -677,3 +729,42 @@ class MainWindow(QMainWindow):
         p.setCancelButton(None)
         p.show()
         return p
+
+    def _run_bg(self, message, fn, on_done, on_error=None):
+        """Run a blocking callable off the UI thread behind a live modal
+        progress dialog, then hand its result to on_done back on the UI thread.
+
+        This is what keeps intake hashing, evidence copy/export, PDF building
+        and case opening from freezing the window: the dialog animates and the
+        app stays painted while the work runs. The dialog stays modal, so the
+        user still waits for the operation exactly as before — only the freeze
+        is gone.
+
+        fn(progress) does the work and returns a value; progress(str) posts
+        status lines to the dialog. on_done(value) runs on success; on_error(str)
+        on failure (a critical message box by default).
+        """
+        from .task_worker import BackgroundTask
+        prog = self._progress(message)
+
+        def _cleanup():
+            prog.close()
+            self._bg_task = None
+
+        def _on_done(result):
+            _cleanup()
+            on_done(result)
+
+        def _on_fail(msg):
+            _cleanup()
+            if on_error:
+                on_error(msg)
+            else:
+                QMessageBox.critical(self, "Operation failed", msg)
+
+        task = BackgroundTask(fn)
+        task.progress.connect(prog.setLabelText)
+        task.done.connect(_on_done)
+        task.failed.connect(_on_fail)
+        self._bg_task = task              # keep a reference while it runs
+        task.start()
