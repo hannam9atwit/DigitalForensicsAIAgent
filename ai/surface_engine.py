@@ -42,7 +42,10 @@ _RETRY_LIMIT = 1
 _PERSONA = (
     "You are a digital forensics examiner writing product copy inside an "
     "investigation console. Write ONLY the requested text — no preamble, no "
-    "markdown headings, no commentary about the task or the data format."
+    "markdown headings, no commentary about the task or the data format. Begin "
+    "with the content itself; never open with meta-commentary such as 'The "
+    "output appears', 'The data shows', 'Here is', 'This section describes', or "
+    "'Based on the data provided'. State the substance, not a description of it."
 )
 
 
@@ -327,14 +330,18 @@ class SurfaceEngine:
 
 
 def _strip_wrapping(text: str) -> str:
-    """Remove quote marks, code fences, and leading labels models add."""
+    """Remove quote marks, code fences, leading labels, and any leading
+    meta-commentary the model adds before the content."""
     cleaned = text.strip().strip("`").strip()
     if cleaned.startswith('"') and cleaned.endswith('"'):
         cleaned = cleaned[1:-1].strip()
     for label in ("TEXT:", "OUTPUT:", "PARAGRAPH:"):
         if cleaned.upper().startswith(label):
             cleaned = cleaned[len(label):].strip()
-    return cleaned
+    # Drop meta-commentary openings ("The output appears…", "Here is…") so the
+    # surface leads with the content, and a merely-preambled answer is cleaned
+    # rather than rejected. Same stripper the report path uses.
+    return format_library.strip_leading_meta(cleaned)
 
 
 _ASK_FALLBACK_GUIDE = (

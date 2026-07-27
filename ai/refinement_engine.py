@@ -44,6 +44,10 @@ _PERSONA = (
     "You are a digital forensics examiner writing a formal investigation report. "
     "IMPORTANT RULES:\n"
     "- Write ONLY the report text. Do not describe, explain, or comment on the data format.\n"
+    "- Begin the FIRST sentence with the forensic content itself. Never open with "
+    "meta-commentary about the data or the task — do NOT start with 'The output "
+    "appears', 'The data shows', 'Here is', 'This section describes', 'Based on the "
+    "data provided', or anything similar. Write the finding, not a description of it.\n"
     "- Do NOT mention JSON, arrays, objects, properties, or data structures.\n"
     "- Do NOT say 'here is a breakdown', 'here are observations', or 'if you would like'.\n"
     "- Do NOT ask questions or offer to help further.\n"
@@ -57,10 +61,13 @@ _FEW_SHOT = """
 EXAMPLE OF WRONG OUTPUT (never do this):
 "This is a JSON array of objects. Each object has properties: type, severity, reason, timestamp. There are 21 objects in the array. If you would like me to help process this data, feel free to ask."
 
+EXAMPLE OF WRONG OUTPUT (never do this — this narrates instead of concluding):
+"The output appears to describe several deleted directories. Based on the data provided, here is a summary of what the records show."
+
 EXAMPLE OF CORRECT OUTPUT (always do this):
 "Twenty-one deleted directories were identified that still contain active child entries. This pattern is consistent with a deliberate but incomplete deletion attempt, where the parent directory was removed while its contents remained accessible. The absence of timestamps across all entries indicates the MFT metadata was subsequently wiped, a recognised anti-forensic technique."
 
-Now write the section below. Begin writing the report immediately after "REPORT TEXT:".
+Now write the section below. Begin writing the report immediately after "REPORT TEXT:" — with the forensic content, not a description of it.
 """
 
 
@@ -453,25 +460,17 @@ class RefinementEngine:
     # ── Preamble stripper ─────────────────────────────────────────────────────
 
     def _strip_preamble(self, text: str) -> str:
-        """Remove any boilerplate the model outputs before the actual report text."""
+        """Remove any boilerplate the model outputs before the actual report text.
+
+        First drops an echoed "REPORT TEXT:" label, then strips leading
+        meta-commentary sentences ("The output appears to list…", "Here is the
+        section:") via the shared format_library stripper, which cuts at the
+        first sentence boundary rather than dropping the whole line — so a
+        preamble glued to the real prose loses only the preamble.
+        """
         if "REPORT TEXT:" in text:
             text = text.split("REPORT TEXT:", 1)[-1]
-
-        bad_starts = (
-            "here is", "here's", "below is", "the following",
-            "this is a", "this data", "based on the",
-            "i have", "i will", "let me", "sure,", "certainly",
-            "of course", "as requested",
-        )
-        lines = text.strip().split("\n")
-        while lines:
-            first = lines[0].strip().lower()
-            if any(first.startswith(b) for b in bad_starts) or first == "":
-                lines.pop(0)
-            else:
-                break
-
-        return "\n".join(lines).strip()
+        return format_library.strip_leading_meta(text)
 
     # ── Context builder ───────────────────────────────────────────────────────
 

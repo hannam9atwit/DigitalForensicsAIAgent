@@ -3,6 +3,7 @@ max_sentences: 3
 max_chars: 340
 min_chars: 40
 forbid: technical term, in other words, simply put, basically, —, "**"
+forbid_opening: the output appears, here is, this section describes, based on the data provided
 ---
 FORMAT: "In plain terms" explanation.
 
@@ -15,6 +16,9 @@ Structure:
 2. Why it matters in this case (or that it is routine, if it is).
 
 Rules:
+- Open with what the thing is, not a description of the data. Never begin with
+  "The output appears", "Here is", "This section describes", or "Based on the
+  data provided".
 - No jargon without an immediate everyday translation.
 - No hedging filler ("it could potentially possibly").
 - Concrete numbers over vague quantities when the data has them.

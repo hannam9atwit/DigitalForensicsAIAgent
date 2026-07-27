@@ -35,12 +35,53 @@ SURFACE_REPORT_SECTION = "report_section"
 _HEADER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 # Phrases that mean the model narrated the data instead of writing the surface.
-# Applied to every surface on top of each spec's own forbid list.
+# Matched anywhere in the output. Applied to every surface on top of each spec's
+# own forbid list.
 _ALWAYS_FORBIDDEN = [
     "json", "array of", "objects with", "here is a breakdown",
     "here are the", "if you would like", "feel free to", "as an ai",
     "i cannot", "i can't", "sure!", "certainly!",
 ]
+
+# Meta-commentary the model uses to *open* — describing the data or the task
+# instead of writing the content ("The output appears to list…", "Here is the
+# section:", "Based on the data provided…"). These are matched only against the
+# START of the output, so a legitimate mid-sentence "…the value here is 482 MB"
+# is never rejected. Applied to every surface; specs may add their own via a
+# `forbid_opening:` header. Also drives strip_leading_meta().
+FORBIDDEN_OPENINGS = [
+    "the output appears", "the output shows", "the output is",
+    "the output contains", "the data appears", "the data shows",
+    "the data provided", "the provided data", "this data",
+    "this section describes", "this section will", "this section provides",
+    "this section covers", "in this section", "based on the data",
+    "based on the provided", "based on the information", "based on the analysis",
+    "here is", "here's", "here are", "below is", "below are", "the following",
+    "i have", "i will", "let me", "as requested", "as an ai", "as an assistant",
+    "it appears that", "the analysis appears", "sure,", "certainly", "of course",
+]
+
+_SENTENCE_BOUNDARY = re.compile(r"[.!?:\n]")
+
+
+def strip_leading_meta(text: str) -> str:
+    """Remove meta-commentary sentences a model prepends before the real
+    content — "The output appears to list…", "Here is the section:" — and
+    return the content that follows.
+
+    A FORBIDDEN_OPENINGS phrase is matched only at the very start, then the text
+    is cut at the first sentence or label boundary; this repeats so a stacked
+    preamble ("Here is the report. The output shows…") is fully removed while
+    the forensic prose is kept. Idempotent.
+    """
+    cleaned = (text or "").strip()
+    for _ in range(6):
+        lowered = cleaned.lower()
+        if not any(lowered.startswith(opening) for opening in FORBIDDEN_OPENINGS):
+            break
+        boundary = _SENTENCE_BOUNDARY.search(cleaned)
+        cleaned = cleaned[boundary.end():].strip() if boundary else ""
+    return cleaned
 
 
 def _formats_dir() -> str:
@@ -61,6 +102,9 @@ class FormatSpec:
         self.max_chars = limits.get("max_chars")
         self.min_chars = limits.get("min_chars", 20)
         self.forbidden = _ALWAYS_FORBIDDEN + limits.get("forbid", [])
+        # Openings are matched against the start of the output only.
+        self.forbidden_openings = FORBIDDEN_OPENINGS + limits.get(
+            "forbid_opening", [])
 
     def validate(self, text: str) -> list[str]:
         """Return a list of violations; empty means the output conforms."""
@@ -82,6 +126,13 @@ class FormatSpec:
         for phrase in self.forbidden:
             if phrase in lowered:
                 violations.append(f"forbidden phrase: {phrase!r}")
+
+        # Meta-commentary openings — checked at the start, so real prose that
+        # merely contains one of these words mid-sentence is not penalised.
+        for opening in self.forbidden_openings:
+            if lowered.startswith(opening):
+                violations.append(f"meta-commentary opening: {opening!r}")
+                break
 
         return violations
 
@@ -118,8 +169,8 @@ def _parse_header(header: str) -> dict:
                 limits[key] = int(value)
             except ValueError:
                 pass
-        elif key == "forbid":
-            limits["forbid"] = [
+        elif key in ("forbid", "forbid_opening"):
+            limits[key] = [
                 phrase.strip().strip('"').lower()
                 for phrase in value.split(",")
                 if phrase.strip()

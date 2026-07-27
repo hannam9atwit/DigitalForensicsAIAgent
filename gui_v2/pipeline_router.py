@@ -205,20 +205,10 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     except Exception as e:
         log(f"[!] reasoning engines unavailable: {e}")
 
-    # lightweight rules specific to the new sources
-    for e in all_events:
-        if e.get("type") == "service":
-            findings.append({"type": "service_installed", "severity": 3,
-                             "path": e.get("path"), "timestamp": e["timestamp"],
-                             "reason": e.get("label", ""), "details": e})
-        elif e.get("type") == "log_cleared":
-            findings.append({"type": "history_gap", "severity": 4,
-                             "path": e.get("path"), "timestamp": e["timestamp"],
-                             "reason": e.get("label", ""), "details": e})
-        elif e.get("type") == "usb":
-            findings.append({"type": "exfiltration_removable_media", "severity": 3,
-                             "path": e.get("path"), "timestamp": e["timestamp"],
-                             "reason": e.get("label", ""), "details": e})
+    # lightweight rules specific to the new sources — aggregated one finding
+    # per pattern (not one per event), matching the rule engine's shape so a
+    # log full of USB or service events stays a single readable finding.
+    findings += _aggregate_source_findings(all_events)
 
     # MITRE + confidence
     try:
@@ -270,3 +260,62 @@ def _src_for(kind):
     return {"disk": "Disk", "browser": "Browser", "registry": "Registry",
             "eventlog": "EventLog", "prefetch": "Disk", "network": "Network",
             "email": "Email"}.get(kind, "Disk")
+
+
+# Windows/registry event types that each collapse to one aggregated finding.
+# (event type, finding type, severity, noun-builder(count)).
+_SOURCE_RULES = [
+    ("service", "service_installed", 3,
+     lambda n: f"{n:,} service{'' if n == 1 else 's'} installed"),
+    ("log_cleared", "history_gap", 4,
+     lambda n: f"{n:,} log or history clear event{'' if n == 1 else 's'} recorded"),
+    ("usb", "exfiltration_removable_media", 3,
+     lambda n: f"{n:,} file{'' if n == 1 else 's'} written to removable media"),
+]
+
+
+def _aggregate_source_findings(all_events):
+    """Collapse the per-event service/log-clear/USB rules into one finding each.
+
+    Emitting one finding per matching event turned a busy event log into
+    thousands of identical entries; this keeps each pattern a single finding
+    carrying a count, time span and a small sample of labels — the same shape
+    the rule engine produces.
+    """
+    def fmt(ts):
+        try:
+            return datetime.datetime.utcfromtimestamp(int(ts)).strftime(
+                "%Y-%m-%d %H:%M:%S UTC")
+        except (ValueError, OSError, OverflowError, TypeError):
+            return str(ts)
+
+    buckets = {}
+    for e in all_events:
+        etype = e.get("type")
+        if etype in ("service", "log_cleared", "usb"):
+            buckets.setdefault(etype, []).append(e)
+
+    findings = []
+    for etype, ftype, severity, phrase in _SOURCE_RULES:
+        events = buckets.get(etype)
+        if not events:
+            continue
+        times = sorted(x["timestamp"] for x in events
+                       if isinstance(x.get("timestamp"), int) and x["timestamp"] > 0)
+        span = ""
+        if times:
+            span = (f" on {fmt(times[0])}" if times[0] == times[-1]
+                    else f", spanning {fmt(times[0])} to {fmt(times[-1])}")
+        labels = [x.get("label", "") for x in events if x.get("label")][:8]
+        findings.append({
+            "type":      ftype,
+            "severity":  severity,
+            "count":     len(events),
+            "path":      f"{len(events):,} events",
+            "timestamp": times[0] if times else events[0].get("timestamp"),
+            "reason":    (f"{phrase(len(events))}{span}. Examples: "
+                          f"{'; '.join(labels) if labels else 'none recorded'}."),
+            "details":   {"count": len(events), "sample": labels,
+                          "artifact": events[0].get("artifact")},
+        })
+    return findings
