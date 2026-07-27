@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QMessageBox, QProgressDialog, QFileDialog, QFrame,
 )
 
-from . import theme, widgets as w, content
+from . import theme, widgets as w, content, thread_registry
 from .case_model import empty_case
 from .intake_dialog import IntakeDialog, EVIDENCE_FILTER
 from .rail import ExplainerRail, RailPayload
@@ -85,7 +85,9 @@ class MainWindow(QMainWindow):
 
         self.builder = None
         self.case = empty_case()
-        self._bg_task = None
+        # Every in-flight BackgroundTask is held here until it signals finished,
+        # so a task is never freed (nor overwritten by a later one) mid-run.
+        self._bg_tasks = set()
 
         from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
@@ -496,17 +498,26 @@ class MainWindow(QMainWindow):
                                     "Create a case and add evidence first.")
             return
         self.show_analyzing()
-        self.thread = QThread()
-        self.worker = AnalysisWorker(self.builder, self._ai_config())
-        self.worker.moveToThread(self.thread)
-        self.worker.log.connect(self._analysis_log)
-        self.worker.stage.connect(lambda n: self._analyzing.set_step(n))
-        self.worker.finished.connect(self._analysis_done)
-        self.worker.error.connect(self._analysis_error)
-        self.thread.started.connect(self.worker.run)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.error.connect(self.thread.quit)
-        self.thread.start()
+        # Local refs, not self.thread/self.worker: a second run must never
+        # overwrite (and so free) a thread that is still running. thread_registry
+        # keeps both alive until the thread's finished() signal fires.
+        thread = QThread()
+        worker = AnalysisWorker(self.builder, self._ai_config())
+        worker.moveToThread(thread)
+        worker.log.connect(self._analysis_log)
+        worker.stage.connect(lambda n: self._analyzing.set_step(n))
+        worker.finished.connect(self._analysis_done)
+        worker.error.connect(self._analysis_error)
+        thread.started.connect(worker.run)
+        # Free the worker on the worker thread while its event loop is still
+        # running, then stop the loop; the thread deletes itself via the
+        # registry on finished().
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread_registry.track(thread, worker)
+        thread.start()
 
     def _analysis_log(self, msg):
         self.statusBar().showMessage(f"● PIPELINE RUNNING — {msg}")
@@ -747,16 +758,12 @@ class MainWindow(QMainWindow):
         from .task_worker import BackgroundTask
         prog = self._progress(message)
 
-        def _cleanup():
-            prog.close()
-            self._bg_task = None
-
         def _on_done(result):
-            _cleanup()
+            prog.close()
             on_done(result)
 
         def _on_fail(msg):
-            _cleanup()
+            prog.close()
             if on_error:
                 on_error(msg)
             else:
@@ -766,5 +773,16 @@ class MainWindow(QMainWindow):
         task.progress.connect(prog.setLabelText)
         task.done.connect(_on_done)
         task.failed.connect(_on_fail)
-        self._bg_task = task              # keep a reference while it runs
+        # Retain until the worker thread has fully finished — released on
+        # finished(), never on done/failed, so the object outlives its thread.
+        self._bg_tasks.add(task)
+        task.finished.connect(lambda t=task: self._bg_tasks.discard(t))
         task.start()
+
+    def closeEvent(self, event):
+        """Stop and join any live QThread workers before the window (and then
+        the interpreter) tears down, so a still-running thread is never
+        collected. Daemon-thread jobs (BackgroundTask, viewer, ai) die with the
+        process on their own and need no join."""
+        thread_registry.shutdown()
+        super().closeEvent(event)

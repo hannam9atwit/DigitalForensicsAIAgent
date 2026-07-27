@@ -33,6 +33,7 @@ class BackgroundTask(QObject):
     progress = Signal(str)      # human-readable status line
     done = Signal(object)       # the callable's return value
     failed = Signal(str)        # exception text
+    finished = Signal()         # always last — the thread has returned
 
     def __init__(self, fn, parent=None):
         super().__init__(parent)
@@ -46,6 +47,9 @@ class BackgroundTask(QObject):
             result = self._fn(self.progress.emit)
         except Exception as e:                                   # noqa: BLE001
             self.failed.emit(str(e))
-            return
-        # Cross-thread emit: Qt queues this onto the receiver's (UI) thread.
-        self.done.emit(result)
+        else:
+            # Cross-thread emit: Qt queues this onto the receiver's (UI) thread.
+            self.done.emit(result)
+        # Fires after done/failed so an owner can release its reference only
+        # once the worker has truly stopped, never on the result alone.
+        self.finished.emit()

@@ -147,8 +147,6 @@ class SetupWizard(QDialog):
         self.setMinimumSize(560, 460)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background: {self._P['bg']}; }}")
-        self._thread = None
-        self._worker = None
         self._build()
 
     def _build(self):
@@ -240,19 +238,22 @@ class SetupWizard(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # indeterminate until a % arrives
 
-        self._thread = QThread()
-        self._worker = _SetupWorker()
-        self._worker.moveToThread(self._thread)
+        # Tracked in thread_registry so it survives even if the dialog is closed
+        # mid-install, rather than being freed with the dialog while running.
+        from . import thread_registry
+        thread = QThread()
+        worker = _SetupWorker()
+        worker.moveToThread(thread)
 
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._append_log)
-        self._worker.phase.connect(self._phase.setText)
-        self._worker.pct.connect(self._set_pct)
-        self._worker.done.connect(self._finished)
-        self._worker.done.connect(self._thread.quit)
-        self._thread.finished.connect(self._thread.deleteLater)
-
-        self._thread.start()
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._append_log)
+        worker.phase.connect(self._phase.setText)
+        worker.pct.connect(self._set_pct)
+        worker.done.connect(self._finished)
+        worker.done.connect(worker.deleteLater)
+        worker.done.connect(thread.quit)
+        thread_registry.track(thread, worker)
+        thread.start()
 
     def _set_pct(self, percent: int):
         if percent < 0:
