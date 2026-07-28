@@ -97,34 +97,51 @@ class SurfaceEngine:
         return self._generate(format_library.SURFACE_WHAT_IT_MEANS, prompt, fallback)
 
     def ask(self, question: str, case: dict) -> dict | None:
-        """Answer an examiner's question from the case data.
+        """Answer an examiner's question from the case knowledge base.
+
+        Retrieves the digested entries most relevant to the question and answers
+        from those plus the findings index — never by re-reasoning over raw
+        events — and cites the source artifacts/findings. When the deep dive is
+        still incomplete, it answers from what exists and says what has not been
+        analysed yet.
 
         Returns {"paras", "uncertain", "chips"} for the chat bubble, or None
         only when no engine is reachable or the model genuinely returns nothing.
-
-        Interactive chat is lenient by design: a small local model will not
-        always hit a strict output format, and rejecting a real, useful answer
-        because it used a dash or an extra sentence is worse than showing it.
-        So instead of validating-and-rejecting, we clean the answer (strip
-        markdown, normalize dashes) and accept any non-empty response. The
-        SOURCES / UNCERTAIN lines are parsed if the model provided them but are
-        not required.
+        Interactive chat stays lenient: the answer is cleaned rather than
+        rejected on a format slip, and SOURCES are seeded from the retrieved
+        entries when the model omits them.
         """
         if not self.available():
             return None
 
+        from ai import knowledge_base as kb_mod
+        knowledge = kb_mod.KnowledgeBase.from_list(case.get("knowledge_base", []))
+        entries = (knowledge.retrieve(question, k=6, embed_fn=self.embed)
+                   if len(knowledge) else [])
+        incomplete = self._dive_incomplete(case, knowledge)
+
         spec = format_library.load("ask_answer")
         spec_text = spec.prompt_text if spec else _ASK_FALLBACK_GUIDE
-        prompt = (
-            f"QUESTION: {question}\n\n"
-            f"CASE DATA:\n{self._case_context(case)}"
-        )
+
+        context = [f"CASE: {case.get('caseMeta', {}).get('title', '')}"]
+        if entries:
+            context.append("ANALYSED FINDINGS — reason from these and cite their "
+                           "IDs:\n" + _format_kb_entries(entries))
+        context.append("FINDINGS INDEX:\n" + self._findings_index(case))
+        if incomplete:
+            context.append("NOTE: the deep analysis is still in progress; some "
+                           "artifacts may not be digested yet. Answer from what "
+                           "is available and state plainly what has not been "
+                           "analysed.")
+        prompt = (f"QUESTION: {question}\n\n" + "\n\n".join(context))
         full_prompt = f"{_PERSONA}\n\n{spec_text}\n\nTASK:\n{prompt}\n\nTEXT:"
 
         text = self._call_llm(full_prompt)
         if text is None:
             return None
         text = _strip_wrapping(text)
+        self._last_entries = entries        # so _parse_answer can seed sources
+        self._last_incomplete = incomplete
         if len(text.strip()) < 15:
             return None  # genuinely empty / broken response
 
@@ -159,15 +176,52 @@ class SurfaceEngine:
 
         known_evidence = {e.get("id"): e for e in case.get("evidence", [])}
         known_findings = {f.get("id") for f in case.get("findings", [])}
-        chips = []
-        for source_id in source_ids:
+
+        # Seed the cited sources from the retrieved knowledge-base entries when
+        # the model named none, so an answer built from digested evidence always
+        # points back to the artifacts it rests on.
+        if not source_ids:
+            for entry in getattr(self, "_last_entries", []) or []:
+                source_ids.extend(entry.get("artifact_ids", []))
+                source_ids.extend(entry.get("finding_ids", []))
+
+        chips, seen = [], set()
+        for source_id in [s.upper() for s in source_ids]:
+            if source_id in seen:
+                continue
+            seen.add(source_id)
             if source_id in known_evidence:
                 name = known_evidence[source_id].get("name", source_id)
                 chips.append((f"{source_id} · {name}", source_id))
             elif source_id in known_findings:
                 chips.append((source_id, source_id))
 
-        return {"paras": paras, "uncertain": uncertain, "chips": chips}
+        # When the dive is still running, name that honestly rather than letting
+        # a partial answer read as complete.
+        if getattr(self, "_last_incomplete", False) and not uncertain:
+            uncertain = ("The deep analysis is still running, so some artifacts "
+                         "may not be reflected in this answer yet.")
+
+        return {"paras": paras, "uncertain": uncertain, "chips": chips[:6]}
+
+    # ── knowledge-base helpers ─────────────────────────────────────────────────
+
+    def _findings_index(self, case):
+        findings = case.get("findings", [])
+        if not findings:
+            return "No findings were recorded."
+        return "\n".join(
+            f"- {f.get('id', '')} [{f.get('sev', '')}] {f.get('title', '')}: "
+            f"{f.get('short', '')}" for f in findings[:40])
+
+    def _dive_incomplete(self, case, knowledge):
+        """True while the knowledge base is still being built — used to answer
+        honestly on partial results. Complete once the case-level synthesis has
+        landed (the last thing the dive writes)."""
+        from ai import knowledge_base as kb_mod
+        if len(knowledge) == 0:
+            return True
+        return knowledge.slot(kb_mod.TOPIC_CONCLUSION) is None
 
     # ── Generation core ──────────────────────────────────────────────────────
 
@@ -177,6 +231,23 @@ class SurfaceEngine:
         if self.provider in _CLOUD_DEFAULT_MODELS:
             return bool(self.api_key)
         return False
+
+    def complete(self, prompt: str):
+        """Raw completion for callers that build their own prompt and validate
+        their own output (the deep dive). Returns the model's text, or None when
+        no engine is reachable — the signal the dive uses to degrade honestly."""
+        if not self.available():
+            return None
+        return self._call_llm(prompt)
+
+    def embed(self, texts):
+        """Embed a list of strings via the local Ollama embeddings endpoint, for
+        semantic retrieval. Returns a list of vectors, or None when no embedding
+        model is available — callers fall back to lexical retrieval. Ollama
+        only; cloud embedding is out of scope for the offline-first path."""
+        if self.provider != "ollama":
+            return None
+        return ollama_runtime.embed(texts)
 
     def _generate(self, surface: str, prompt: str, fallback: str) -> str:
         spec = format_library.load(surface)
@@ -342,6 +413,18 @@ def _strip_wrapping(text: str) -> str:
     # surface leads with the content, and a merely-preambled answer is cleaned
     # rather than rejected. Same stripper the report path uses.
     return format_library.strip_leading_meta(cleaned)
+
+
+def _format_kb_entries(entries):
+    """Render retrieved knowledge-base entries as compact, citable context —
+    each carries the artifact/finding IDs it derives from, so the model can
+    cite them and the answer stays grounded."""
+    lines = []
+    for entry in entries:
+        ids = entry.get("artifact_ids", []) + entry.get("finding_ids", [])
+        tag = f"[{', '.join(ids)}] " if ids else ""
+        lines.append(f"- {tag}{entry.get('title', '')}: {entry.get('answer', '')}")
+    return "\n".join(lines)
 
 
 _ASK_FALLBACK_GUIDE = (

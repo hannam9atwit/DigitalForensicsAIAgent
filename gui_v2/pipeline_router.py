@@ -220,33 +220,19 @@ def run_analysis(evidence_list, log=print, ai_config=None):
     except Exception:
         pass
 
-    # narrative — carries both the drafted text and an honest record of who
-    # drafted it (the local model, or the rule-based fallback and why).
-    narrative_md = ""
-    ai_status = None
-    try:
-        from ai.narrative_engine import NarrativeEngine
-        engine = NarrativeEngine(ai_config)
-        narrative_md = engine.generate({
-            "findings": findings, "anomalies": anomalies,
-            "timeline": {"events": all_events}, "browser": {},
-            "summary": {"finding_count": len(findings), "anomaly_count": len(anomalies)},
-        })
-        ai_status = engine.ai_status
-    except Exception as e:
-        log(f"[~] narrative generation skipped: {e}")
-        ai_status = {"used_llm": False, "provider": "", "model": "",
-                     "reason": "narrative generation failed", "detail": str(e)}
-
-    if ai_status and ai_status.get("used_llm"):
-        log(f"[+] Narrative drafted by {ai_status.get('model')}")
-    elif ai_status:
-        log(f"[~] Narrative rule-based — AI unavailable: {ai_status.get('reason')}")
+    # No LLM in the deterministic pipeline: the case must open the instant
+    # parsing and reasoning finish. All AI narrative — the report summary and
+    # conclusion, the case overview, question answering — is produced by the
+    # background deep dive (ai/deep_dive.py) and reasons from the digested
+    # knowledge base, not a flat context dump. Until the dive runs, the narrative
+    # slots stay empty and each surface shows its deterministic fallback.
+    log("[+] Deterministic analysis complete — AI insights run in the background")
 
     dur = time.time() - t0
     return {
         "events": all_events, "findings": findings, "anomalies": anomalies,
-        "narrative": {"markdown": narrative_md, "ai_status": ai_status},
+        "narrative": {"markdown": "", "ai_status": None},
+        "knowledge_base": [],
         "parserStatus": parser_status,
         "pipeline": {
             "lastRun": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

@@ -312,3 +312,47 @@ def ensure_ready(model: str = DEFAULT_MODEL) -> dict:
     if is_installed() and not server_running():
         start_server()
     return readiness(model, use_cache=False)
+
+
+# Embedding models are named by convention; use whichever is installed.
+_EMBED_HINTS = ("embed", "minilm", "bge", "gte")
+
+
+def embedding_model() -> str | None:
+    """The name of an installed embedding model, or None if none is present.
+
+    Semantic retrieval is optional: when this returns None the knowledge base
+    falls back to lexical search, so nothing depends on an embedding model
+    having been pulled.
+    """
+    for name in installed_models():
+        if any(hint in name.lower() for hint in _EMBED_HINTS):
+            return name
+    return None
+
+
+def embed(texts) -> list | None:
+    """Embed a list of strings via the local embeddings endpoint.
+
+    Returns a list of vectors aligned with `texts`, or None when no embedding
+    model is available or any request fails — the signal to use lexical search.
+    """
+    model = embedding_model()
+    if not model:
+        return None
+    vectors = []
+    for text in texts:
+        payload = json.dumps({"model": model, "prompt": text}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/embeddings", data=payload,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        vector = body.get("embedding")
+        if not vector:
+            return None
+        vectors.append(vector)
+    return vectors
