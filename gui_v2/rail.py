@@ -34,12 +34,17 @@ class RailPayload:
     steps  : ["do this", …]    — the "WHAT SHOULD I DO?" checklist
     chips  : [(label, ref)]    — navigation chips; `ref` is resolved by the
                                  window, so the rail never imports a screen
+    action : a zero-arg callable the owning screen supplies (e.g. Evidence's
+             on-demand "Explain with AI"); the rail invokes it on click and
+             shows a live elapsed-time indicator, without knowing what it does.
     """
     title: str = ""
     blocks: List[Tuple[str, str]] = field(default_factory=list)
     steps: List[str] = field(default_factory=list)
     chips: List[Tuple[str, str]] = field(default_factory=list)
     chip_head: str = "SEE THE EVIDENCE"
+    action_label: str = ""
+    action: Callable = None
 
 
 class ExplainerRail(QFrame):
@@ -108,8 +113,37 @@ class ExplainerRail(QFrame):
         if payload.chips:
             self._body.addWidget(self._chip_row(payload.chip_head, payload.chips))
 
+        if payload.action:
+            self._body.addWidget(self._action_block(
+                payload.action_label or "Explain with AI", payload.action))
+
         self._body.addWidget(self._mini_chat())
         self._body.addStretch(1)
+
+    def _action_block(self, label, callback):
+        """A one-tap action the owning screen supplies. On click the button is
+        replaced by a live "Thinking… Ns" indicator and the callable runs; when
+        it finishes the screen pushes a fresh payload and the whole body
+        re-renders. The rail stays dumb — it never learns what the action does.
+        """
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        thinking = w.ThinkingLabel(size=12.5, color=P["text2"])
+        thinking.setVisible(False)
+
+        def go():
+            btn.setVisible(False)
+            thinking.setVisible(True)
+            thinking.start()
+            callback()
+
+        btn = w.link_button(label, go)
+        v.addWidget(btn)
+        v.addWidget(thinking)
+        return box
 
     def _mini_chat(self):
         """A compact 'ask the model about this' box, present on every screen
@@ -125,6 +159,11 @@ class ExplainerRail(QFrame):
         self._mini_answer = w.body("", size=12, color=P["text2"], lh=1.5)
         self._mini_answer.setVisible(False)
         v.addWidget(self._mini_answer)
+
+        # Live elapsed-time indicator shown while the model answers.
+        self._mini_thinking = w.ThinkingLabel(size=12, color=P["text2"])
+        self._mini_thinking.setVisible(False)
+        v.addWidget(self._mini_thinking)
 
         row = QWidget()
         h = QHBoxLayout(row)
@@ -146,12 +185,16 @@ class ExplainerRail(QFrame):
         if not question:
             return
         self._mini_input.clear()
-        self._mini_answer.setVisible(True)
-        self._mini_answer.setText("Thinking…")
+        self._mini_answer.setVisible(False)
+        self._mini_thinking.setVisible(True)
+        self._mini_thinking.start()
         self.ask_submitted.emit(question)
 
     def show_mini_answer(self, text: str):
         """Called by the window when the async answer returns."""
+        if hasattr(self, "_mini_thinking") and self._mini_thinking is not None:
+            self._mini_thinking.stop()
+            self._mini_thinking.setVisible(False)
         if hasattr(self, "_mini_answer") and self._mini_answer is not None:
             self._mini_answer.setVisible(True)
             self._mini_answer.setText(text)

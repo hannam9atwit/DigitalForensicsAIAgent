@@ -211,9 +211,18 @@ def warm_model(model: str = DEFAULT_MODEL) -> bool:
     Warming only loads a model that is already present; it never downloads
     (that needs consent). keep_alive asks Ollama to hold the model resident.
     Returns True if the model is warm afterward.
+
+    A model that is already loaded needs no warm-up: on a local CPU model the
+    warm request is itself a full 30-90s generation, so double-warming would
+    double the latency the user feels. When model_loaded() is already True this
+    returns immediately, making the call safe to issue from any path — the app
+    warms once at startup (see gui_v2/startup.py) and this guard keeps every
+    later call a no-op rather than a second generation.
     """
     if not server_running() or not model_available(model):
         return False
+    if model_loaded(model):
+        return True
     payload = json.dumps({
         "model": model,
         "prompt": "ok",

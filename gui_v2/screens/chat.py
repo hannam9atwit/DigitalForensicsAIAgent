@@ -262,8 +262,12 @@ class ChatScreen(Screen):
         bub.setObjectName("bubbleAi")
         v = QVBoxLayout(bub)
         v.setContentsMargins(16, 12, 16, 12)
-        v.addWidget(w.label("Reading the case evidence…", size=12.5,
-                            color=P["text3"]))
+        # Live elapsed-time indicator: a 30-90s local-model answer should read
+        # as work ("Thinking… 12s"), not a hung bubble. Created fresh per ask,
+        # so it counts from the moment the question was sent.
+        thinking = w.ThinkingLabel(size=12.5, color=P["text3"])
+        thinking.start()
+        v.addWidget(thinking)
         h.addWidget(bub)
         h.addStretch(1)
         return wrap
