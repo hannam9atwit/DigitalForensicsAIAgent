@@ -16,5 +16,7 @@ Rules:
   "The output appears", "Here is", "This section describes", or "Based on the
   data provided".
 - Everyday language; translate any necessary term immediately.
-- Concrete numbers, filenames and human-readable times from the finding.
+- Use the numbers, filenames and times carried by THIS finding, written in
+  human-readable form. Where the finding does not carry one, leave it out; do
+  not supply a filename, account or time the finding does not record.
 - No markdown, no em-dashes, no speculation about motive.

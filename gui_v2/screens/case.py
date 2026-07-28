@@ -58,6 +58,19 @@ class CaseScreen(Screen):
         row2.addWidget(self._pipeline(), 10)
         row2.addWidget(self._custody(), 12)
         lay.addLayout(row2)
+
+        # A third row rather than a stretch. The first two rows leave the lower
+        # half of the page empty on anything above the design's 1440x900, and the
+        # facts below are ones the examiner otherwise has to go to another screen
+        # to get: what each artifact contributed, when the activity actually
+        # spans, and who the evidence attributes it to.
+        row3 = QHBoxLayout()
+        row3.setContentsMargins(0, 0, 0, 0)
+        row3.setSpacing(14)
+        row3.addWidget(self._artifacts_card(), 12)
+        row3.addWidget(self._activity_card(), 10)
+        row3.addWidget(self._attribution_card(), 10)
+        lay.addLayout(row3)
         lay.addStretch(1)
 
     def on_show(self, arg=None):
@@ -236,6 +249,146 @@ class CaseScreen(Screen):
                                 weight=theme.W_SEMIBOLD, mono=True,
                                 color=P["good"] if ok else P["sevMedium"]))
             card.add(row)
+        card.v.addStretch(1)
+        return card
+
+    # ── case-level detail ─────────────────────────────────────────────────────
+
+    def _artifacts_card(self):
+        """What each artifact actually contributed to the timeline.
+
+        The custody card says an artifact is registered and verified; this says
+        whether it produced anything. An artifact parsed to zero events is the
+        single most useful thing to notice early on the Case tab, because it
+        bounds everything the rest of the case can conclude.
+        """
+        card = w.Card(pad=17, spacing=0)
+        evidence = self.case.get("evidence", [])
+        card.head("WHAT EACH ARTIFACT GAVE US")
+        card.add(w.spacer(h=4))
+
+        if not evidence:
+            card.add(w.body("No artifacts are registered to this case yet.",
+                            size=12, color=P["text3"], lh=1.5))
+            card.v.addStretch(1)
+            return card
+
+        silent = 0
+        for index, artifact in enumerate(evidence):
+            events = artifact.get("events") or 0
+            if not events:
+                silent += 1
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 5, 0, 5)
+            h.setSpacing(8)
+            h.addWidget(w.label(artifact.get("id", "—"), size=10, mono=True,
+                                color=P["text3"]))
+            h.addWidget(w.elided_label(artifact.get("name", ""), 118, size=11.5), 1)
+            h.addWidget(w.label(
+                f"{events:,}" if events else "none",
+                size=11, mono=True,
+                color=P["text"] if events else P["sevMedium"]))
+            card.add(row)
+            if index < len(evidence) - 1:
+                card.add(w.hline())
+
+        card.add(w.spacer(h=6))
+        card.add(w.body(
+            (f"{silent} artifact{'' if silent == 1 else 's'} produced no events. "
+             f"The audit trail records why for each one."
+             if silent else
+             "Every registered artifact contributed events to the timeline."),
+            size=11.5, color=P["text2"] if not silent else P["sevMedium"], lh=1.5))
+        card.v.addStretch(1)
+        return card
+
+    def _activity_card(self):
+        """When the evidence actually places activity, and how much of it is
+        worth an examiner's attention — both read off the interpreted events."""
+        card = w.Card(pad=17, spacing=0)
+        card.head("WHEN THE ACTIVITY SITS")
+        card.add(w.spacer(h=4))
+
+        events = self.case.get("events", [])
+        stamps = sorted(str(e.get("ts") or "").strip() for e in events
+                        if str(e.get("ts") or "").strip())
+        relevance = {}
+        for event in events:
+            key = str(event.get("rel", "ctx"))
+            relevance[key] = relevance.get(key, 0) + 1
+
+        if not events:
+            card.add(w.body("No events have been interpreted for this case yet.",
+                            size=12, color=P["text3"], lh=1.5))
+            card.v.addStretch(1)
+            return card
+
+        rows = [
+            ("First activity", stamps[0] if stamps else "not recorded"),
+            ("Last activity", stamps[-1] if stamps else "not recorded"),
+            ("Significant", f"{relevance.get('sig', 0):,}"),
+            ("Notable", f"{relevance.get('not', 0):,}"),
+            ("System noise", f"{relevance.get('noise', 0):,}"),
+        ]
+        for index, (key, value) in enumerate(rows):
+            card.add(w.kv_row(key, value))
+            if index < len(rows) - 1:
+                card.add(w.hline())
+
+        if not stamps:
+            card.add(w.spacer(h=6))
+            card.add(w.body(
+                "No event carries a usable timestamp, which is itself worth "
+                "noting: it bounds any sequence the case can establish.",
+                size=11.5, color=P["sevMedium"], lh=1.5))
+        card.v.addStretch(1)
+        return card
+
+    def _attribution_card(self):
+        """Which accounts the evidence establishes — read from the records by
+        ai.accounts, never generated, and stated as an explicit gap when the
+        evidence establishes none."""
+        from ai import accounts as accounts_mod
+
+        card = w.Card(pad=17, spacing=0)
+        card.head("WHO THE EVIDENCE NAMES")
+        card.add(w.spacer(h=4))
+
+        found = accounts_mod.extract(self.case.get("events", []))
+        people = [(name, detail) for name, detail in found.items()
+                  if not detail["service"]]
+        service = [name for name, detail in found.items() if detail["service"]]
+
+        if not people:
+            card.add(w.body(
+                "The evidence does not establish a user account. Nothing here "
+                "can be attributed to a named person, and any account named "
+                "elsewhere in the case would not come from these artifacts.",
+                size=11.5, color=P["sevMedium"], lh=1.5))
+        else:
+            for index, (name, detail) in enumerate(people[:5]):
+                row = QWidget()
+                h = QHBoxLayout(row)
+                h.setContentsMargins(0, 5, 0, 5)
+                h.setSpacing(8)
+                h.addWidget(w.elided_label(name, 120, size=11.5), 1)
+                h.addWidget(w.label(f"{detail['records']:,}", size=11, mono=True,
+                                    color=P["text3"]))
+                card.add(row)
+                if index < min(len(people), 5) - 1:
+                    card.add(w.hline())
+            card.add(w.spacer(h=6))
+            card.add(w.body(
+                "Taken from profile directories and account records on the "
+                "evidence itself, not inferred.",
+                size=11.5, color=P["text2"], lh=1.5))
+
+        if service:
+            card.add(w.spacer(h=4))
+            card.add(w.body(
+                "Built-in service accounts also present: " + ", ".join(service[:4]),
+                size=11, color=P["text3"], lh=1.4))
         card.v.addStretch(1)
         return card
 

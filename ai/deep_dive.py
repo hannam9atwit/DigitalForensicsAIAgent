@@ -25,6 +25,7 @@ and the daemon-thread wrapper (gui_v2/deep_dive_worker.py) owns concurrency.
 import datetime
 from collections import Counter
 
+from ai import accounts as accounts_mod
 from ai import format_library
 from ai import knowledge_base as kb
 
@@ -151,6 +152,10 @@ def _disk_brief(ev, events, findings):
         f"Common file extensions: {_top(exts)}.",
         "Sample user-relevant paths: "
         + ("; ".join(user_paths) if user_paths else "none recorded") + ".",
+        # The profile directories this image actually contains. Without this the
+        # "in whose directories" question has nothing to answer from, and a small
+        # model answers it from its prior instead.
+        accounts_mod.brief(accounts_mod.extract(events)),
         _findings_brief(findings),
     ])
 
@@ -163,6 +168,7 @@ def _generic_brief(ev, events, findings):
         f"Timeframe: {_timeframe(events)}.",
         f"Records on the timeline: {len(events)}.",
         "Sample records: " + ("; ".join(labels) if labels else "none recorded") + ".",
+        accounts_mod.brief(accounts_mod.extract(events)),
         _findings_brief(findings),
     ])
 
@@ -292,7 +298,23 @@ class DeepDive:
         """The ordered list of prompt steps. The COUNT is fixed up front (so the
         countdown can be honest); each step's MATERIAL is built at run time,
         because layers 2 and 3 read the entries the earlier layers produced."""
-        steps = []
+        # Who the evidence establishes, written from the records rather than
+        # asked of the model, and planned FIRST: it is free, it grounds every
+        # layer that follows, and an examiner asking "who is the user" gets a
+        # real answer immediately instead of after the whole dive. It is always
+        # present — an explicit "no account established" is exactly the answer
+        # that stops a plausible name being supplied in its place.
+        steps = [{
+            "layer":        kb.LAYER_CROSS_ARTIFACT,
+            "topic":        kb.TOPIC_ACCOUNTS,
+            "title":        "Accounts on this evidence",
+            "question":     "Which user accounts does this evidence establish?",
+            "artifact_ids": [e.get("id") for e in self.case.get("evidence", [])],
+            "finding_ids":  [],
+            "material":     lambda _k: "",
+            "answer":       self._accounts_answer,
+            "milestone":    False,
+        }]
 
         for ev in self.case.get("evidence", []):
             kind = ev.get("kind", "unknown")
@@ -345,10 +367,17 @@ class DeepDive:
     def run(self, knowledge):
         """Execute the plan against `knowledge` (a KnowledgeBase, possibly with
         entries from a previous, interrupted run — those are skipped). Returns
-        one of: "complete", "cancelled", "unavailable"."""
+        one of: "complete", "cancelled", "unavailable".
+
+        A model that goes away does not end the run: the record-derived steps
+        (see plan()) still produce their entries, so a case with no reachable
+        model still gains the facts that were never a generation in the first
+        place.
+        """
         steps = self.plan()
         total = len(steps)
         done = 0
+        unavailable = False
         self._on_progress(done, total)
 
         for step in steps:
@@ -364,18 +393,37 @@ class DeepDive:
                 self._on_progress(done, total)
                 continue
 
-            material = step["material"](knowledge)
-            answer = self._ask(step["question"], material)
-            if answer is None:
-                self._log("Model became unavailable — keeping completed insights.")
-                return "unavailable"
+            # A step carrying its own `answer` is derived from the records, not
+            # asked of the model: it costs nothing, cannot be fabricated, and is
+            # produced even when no model is reachable.
+            deterministic = step.get("answer")
+            if deterministic is not None:
+                answer = deterministic()
+                confidence = "high"
+            elif unavailable:
+                # The model is gone, but the record-derived steps still owe their
+                # answers; skip only what actually needs generating.
+                done += 1
+                self._on_progress(done, total)
+                continue
+            else:
+                material = step["material"](knowledge)
+                answer = self._ask(step["question"], material)
+                if answer is None:
+                    self._log("Model became unavailable — keeping completed "
+                              "insights and the evidence-derived ones.")
+                    unavailable = True
+                    done += 1
+                    self._on_progress(done, total)
+                    continue
+                confidence = _infer_confidence(answer)
 
             if answer.strip():
                 entry = kb.make_entry(
                     step["topic"], step["title"], answer, step["layer"],
                     artifact_ids=step["artifact_ids"],
                     finding_ids=step["finding_ids"],
-                    confidence=_infer_confidence(answer), generated_at=_now())
+                    confidence=confidence, generated_at=_now())
                 knowledge.add(entry)
                 self._on_entry(entry, step)
 
@@ -384,12 +432,29 @@ class DeepDive:
             if step["milestone"]:
                 self._on_milestone()
 
-        return "complete"
+        return "unavailable" if unavailable else "complete"
+
+    def _accounts_answer(self):
+        """The accounts entry, written straight from the parsed records.
+
+        Deliberately not a model call: an examiner asking "who is the user on
+        this machine" must get the profile directories and account records that
+        are actually on the evidence, or an explicit statement that none was
+        recovered — never a name that merely reads like one.
+        """
+        return accounts_mod.summary_sentence(accounts_mod.extract(self.events))
 
     def _ask(self, question, material):
         """One KB-entry generation with a single validation-guided retry.
-        Returns the answer text, or None only when the model is unreachable."""
-        base = (f"{_PERSONA}\n\n{self._spec.prompt_text if self._spec else ''}\n\n"
+        Returns the answer text, or None only when the model is unreachable.
+
+        The material is the only evidence this entry may rest on, so it is also
+        the yardstick for the grounding check: an entry naming an account, file
+        or address absent from its own material is discarded rather than stored,
+        because every later surface cites these entries as fact.
+        """
+        base = (f"{_PERSONA}\n\n{format_library.GROUNDING}\n\n"
+                f"{self._spec.prompt_text if self._spec else ''}\n\n"
                 f"MATERIAL:\n{material}\n\nQUESTION: {question}\n\nANSWER:")
         prompt = base
         text = ""
@@ -398,11 +463,19 @@ class DeepDive:
             if raw is None:
                 return None  # unreachable — degrade honestly
             text = format_library.strip_leading_meta(_strip_label(raw))
-            violations = self._spec.validate(text) if self._spec else []
+            violations = (self._spec.validate(text) if self._spec else []) + \
+                format_library.ungrounded_identifiers(text, material)
             if not violations:
                 return text
-            prompt = (f"{base}\n\nYour previous answer violated the format "
-                      f"({'; '.join(violations)}). Rewrite it correctly.\nANSWER:")
+            prompt = (f"{base}\n\nYour previous answer was rejected "
+                      f"({'; '.join(violations)}). Rewrite it correctly, using "
+                      f"only values that appear in the MATERIAL above.\nANSWER:")
+        # Still ungrounded after the rewrite: store nothing. A missing insight is
+        # recoverable; a fabricated one is cited onward as evidence.
+        if format_library.ungrounded_identifiers(text, material):
+            self._log("Discarded an insight that named evidence not in its "
+                      "source material.")
+            return ""
         return text  # accept the last attempt; a weak digest beats none
 
 

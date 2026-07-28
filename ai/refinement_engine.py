@@ -25,8 +25,16 @@ import urllib.error
 import urllib.request
 from collections import Counter
 
+from ai import accounts as accounts_mod
 from ai import format_library
 from core import ollama_runtime
+
+
+def _accounts_from_events(events):
+    """The account block handed to the section prompts. Derived from the events
+    themselves so a section can attribute activity to a real account, and is
+    told plainly when none was established."""
+    return accounts_mod.brief(accounts_mod.extract(events))
 
 
 class GenerationCancelled(Exception):
@@ -52,20 +60,23 @@ _PERSONA = (
     "- Do NOT say 'here is a breakdown', 'here are observations', or 'if you would like'.\n"
     "- Do NOT ask questions or offer to help further.\n"
     "- Write in English only. Write as the analyst who ran the investigation.\n"
-    "- Be specific: name file paths, timestamps, and counts directly from the evidence.\n"
+    "- Be specific, but only from the evidence facts given in this prompt: name the "
+    "file paths, timestamps and counts they contain, and no others.\n"
     "- Every sentence must state a forensic conclusion, not describe the data."
 )
 
-# Few-shot example injected into every section prompt
+# Fallback few-shot, used only when formats/report_section.md is missing. Its
+# example is shape-only: every specific is a bracketed placeholder, because a
+# small local model copies an example's values as readily as its structure.
 _FEW_SHOT = """
 EXAMPLE OF WRONG OUTPUT (never do this):
-"This is a JSON array of objects. Each object has properties: type, severity, reason, timestamp. There are 21 objects in the array. If you would like me to help process this data, feel free to ask."
+"This is a JSON array of objects. Each object has properties: type, severity, reason, timestamp. If you would like me to help process this data, feel free to ask."
 
 EXAMPLE OF WRONG OUTPUT (never do this — this narrates instead of concluding):
 "The output appears to describe several deleted directories. Based on the data provided, here is a summary of what the records show."
 
-EXAMPLE OF CORRECT OUTPUT (always do this):
-"Twenty-one deleted directories were identified that still contain active child entries. This pattern is consistent with a deliberate but incomplete deletion attempt, where the parent directory was removed while its contents remained accessible. The absence of timestamps across all entries indicates the MFT metadata was subsequently wiped, a recognised anti-forensic technique."
+SHAPE OF CORRECT OUTPUT (structure only — fill each bracketed slot from the evidence facts below, and never write a bracketed placeholder itself):
+"[COUNT] deleted directories were identified that still contain active child entries. This pattern is consistent with a deliberate but incomplete deletion attempt, where the parent directory was removed while its contents remained accessible. The absence of timestamps across all entries indicates the MFT metadata was subsequently wiped, a recognised anti-forensic technique."
 
 Now write the section below. Begin writing the report immediately after "REPORT TEXT:" — with the forensic content, not a description of it.
 """
@@ -272,7 +283,8 @@ class RefinementEngine:
         return spec.prompt_text if spec else _FEW_SHOT
 
     def _call_ollama(self, prompt: str, timeout: int = 300) -> str:
-        full_prompt = (f"{_PERSONA}\n\n{self._section_format_text()}\n\n"
+        full_prompt = (f"{_PERSONA}\n\n{format_library.GROUNDING}\n\n"
+                       f"{self._section_format_text()}\n\n"
                        f"{prompt}\n\nREPORT TEXT:")
 
         payload = json.dumps({
@@ -299,7 +311,8 @@ class RefinementEngine:
         return text
 
     def _call_anthropic(self, prompt: str, timeout: int = 60) -> str:
-        full_prompt = f"{self._section_format_text()}\n\n{prompt}\n\nREPORT TEXT:"
+        full_prompt = (f"{format_library.GROUNDING}\n\n"
+                       f"{self._section_format_text()}\n\n{prompt}\n\nREPORT TEXT:")
 
         payload = json.dumps({
             "model":      self.ANTHROPIC_MODEL,
@@ -550,6 +563,19 @@ class RefinementEngine:
             if not is_sys(e.get("path", "")) and e.get("timestamp", 0) != 0
         ][:30]
 
+        # Which artifact sources actually contributed events. The context
+        # prompts used to assert a disk image processed with SleuthKit for every
+        # case; on a network- or log-only case that is a fabricated method
+        # statement, so the sections are told what was really examined.
+        source_counts = Counter(e.get("source") or "Unknown" for e in timeline_events)
+        sources_line = ", ".join(f"{name} ({count:,} events)"
+                                 for name, count in source_counts.most_common())
+
+        # Account names the evidence itself carries, so a section that needs to
+        # attribute activity has real accounts to name — and an explicit "none
+        # established" when it does not.
+        accounts = _accounts_from_events(timeline_events)
+
         wiped_count = sum(1 for e in timeline_events if e.get("metadata_wiped"))
         rare_exts   = [a for a in anomalies if a.get("type") == "rare_extension"]
         other_a     = [a for a in anomalies if a.get("type") != "rare_extension"]
@@ -579,6 +605,8 @@ class RefinementEngine:
                 "total_events":     len(timeline_events),
                 "user_events":      len(user_events),
             },
+            "sources":             sources_line or "no artifact produced events",
+            "accounts":            accounts,
             "critical_findings":   critical_sentences,
             "supporting_findings": supporting_sentences,
             "anomalies":           anomaly_sentences,
@@ -601,16 +629,20 @@ class RefinementEngine:
         return (
             f"Write the Executive Summary section of a forensic investigation report.\n"
             f"Write exactly 4 sentences of prose. No bullet points. No headings.\n"
-            f"Sentence 1: What type of system this appears to be and who the subject is.\n"
+            f"Sentence 1: What was examined — the artifact sources and event counts\n"
+            f"  listed below. Name an account as the subject ONLY if the account\n"
+            f"  block below establishes one; otherwise do not refer to a subject.\n"
             f"Sentence 2: The most critical finding identified.\n"
             f"Sentence 3: Whether anti-forensic activity was detected.\n"
             f"Sentence 4: The overall risk level — choose one: Critical / High / Medium / Low / Clean.\n\n"
             f"Evidence facts:\n"
+            f"- Artifact sources examined: {ctx['sources']}\n"
             f"- {s['critical_count']} critical/high severity findings\n"
             f"- {s['supporting_count']} medium/low severity findings\n"
             f"- {s['anomaly_count']} anomalies detected\n"
             f"- {s['wiped_records']} files with wiped MFT metadata\n"
             f"- {s['user_events']} user-relevant filesystem events recovered\n\n"
+            f"{ctx['accounts']}\n\n"
             f"Critical findings:\n{findings_text}"
         )
 
@@ -620,10 +652,13 @@ class RefinementEngine:
         return (
             f"Write the Investigative Context section of a forensic report.\n"
             f"Write 3 short paragraphs. No bullet points.\n"
-            f"Paragraph 1: What was examined — a disk image processed with SleuthKit fls and mactime.\n"
+            f"Paragraph 1: What was examined — name only the artifact sources\n"
+            f"  listed below. Do not describe a tool or an artifact type that is\n"
+            f"  not among them.\n"
             f"Paragraph 2: What data was available — state the event counts and browser data status.\n"
             f"Paragraph 3: Key limitations — what could not be determined and why.\n\n"
             f"Facts:\n"
+            f"- Artifact sources examined: {ctx['sources']}\n"
             f"- Total timeline events: {s['total_events']}\n"
             f"- User-relevant events: {s['user_events']}\n"
             f"- Files with zeroed/wiped metadata: {s['wiped_records']}\n"
@@ -686,8 +721,10 @@ class RefinementEngine:
         return (
             f"Write the Timeline Reconstruction section of a forensic report.\n"
             f"Write 3-4 paragraphs grouping events into phases (e.g. Normal Activity, "
-            f"Suspicious Activity, Deletion Phase). Name specific paths and timestamps.\n"
+            f"Suspicious Activity, Deletion Phase). Name paths and timestamps only "
+            f"as they appear in the event list below, character for character.\n"
             f"Label each conclusion as CONFIRMED or INFERRED. Do not describe data formats.\n\n"
+            f"{ctx['accounts']}\n\n"
             f"Timeline events (format: timestamp | source | path | size):\n{events_text}"
         )
 
