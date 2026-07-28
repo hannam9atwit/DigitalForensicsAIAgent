@@ -3,9 +3,14 @@ gui_v2/screens/findings.py
 
 Findings — the most important screen.
 
-Findings are grouped by incident phase rather than listed by severity, because
-the question an examiner actually has is "what happened, in order", not "what
-scored highest". The phase spine gives that narrative shape.
+Findings are grouped rather than listed flat, because the question an examiner
+actually has is "what happened", not "what scored highest in isolation". The
+spine gives that shape.
+
+What they are grouped BY depends on what the case can support. The demo groups
+by incident phase, which is the design reference; a real analysis has no basis
+for a phase (it is a narrative claim the pipeline never makes), so it groups by
+severity band instead. The presentation is identical either way — see _groups().
 
 Each card is deliberately thin: severity, title, one-line summary. The depth —
 what happened, why it matters, how confident and why, what to do next, which
@@ -32,6 +37,44 @@ def _severity_rank(finding):
     if isinstance(sev, int):
         return sev
     return _SEV_ORDER.get(str(sev).upper(), 0)
+
+
+# The grouping a real analysis can support. The demo groups by incident phase,
+# which is the design reference — but a phase is a narrative claim ("this was the
+# cover-up"), and the pipeline has no basis for one, so inventing phases would
+# put an assertion on screen that the evidence never made. Severity IS in the
+# data, so the same grouped presentation is driven by it: the spine, the group
+# header with its real time span, and the thin cards are identical; only the
+# thing being grouped by is one the evidence actually establishes.
+_SEV_BANDS = [
+    ("CRITICAL", "Critical",
+     "Each of these is on its own enough to change the reading of the case. "
+     "Start here."),
+    ("HIGH", "High",
+     "Strong indicators. Each needs corroboration from a second source before "
+     "it carries full weight."),
+    ("MEDIUM", "Medium",
+     "Supporting detail. These matter in combination with the findings above "
+     "rather than on their own."),
+    ("LOW", "Low",
+     "Context, recorded for completeness so the account of the evidence is "
+     "whole."),
+]
+
+
+def _time_span(items):
+    """The real time range a group of findings covers, for the group header.
+
+    Findings whose rule recorded no timestamp simply do not contribute; an
+    empty result yields an empty header rather than a guessed range.
+    """
+    stamps = sorted(str(f.get("ts") or "").strip() for f in items
+                    if str(f.get("ts") or "").strip())
+    if not stamps:
+        return ""
+    if stamps[0] == stamps[-1]:
+        return stamps[0].upper()
+    return f"{stamps[0]} – {stamps[-1]}".upper()
 
 
 class FindingsScreen(Screen):
@@ -63,8 +106,9 @@ class FindingsScreen(Screen):
         has_phases = bool(self.case.get("phases"))
         lay.addWidget(w.screen_title("What the evidence shows"))
         lay.addWidget(w.body(
-            "Each finding is a plain-English statement of something that happened"
-            + (", grouped into the phases of the incident. " if has_phases else ". ")
+            "Each finding is a plain-English statement of something that happened, "
+            + ("grouped into the phases of the incident. " if has_phases else
+               "grouped by how much each one changes the case. ")
             + "Select one to see the full reasoning, how confident it is and why, "
               "and what to do next.",
             size=13, color=P["text2"]))
@@ -82,30 +126,8 @@ class FindingsScreen(Screen):
         if not self.case.get("demo"):
             lay.addWidget(self._reasoning_card())
 
-        # The phase spine is the demo case's narrative structure. A real
-        # analysis has no notion of incident phases, and inventing them would
-        # assert something the evidence does not say — so those findings render
-        # as a flat list, and anything left over by a partial phase mapping
-        # still gets shown rather than silently dropped.
-        phases = self.case.get("phases") or []
-        placed = set()
-        for ph in phases:
-            items = [f for f in findings if f.get("phase") == ph["n"]]
-            if not items:
-                continue
-            placed.update(f["id"] for f in items)
-            lay.addWidget(self._phase_block(ph, items))
-
-        rest = [f for f in findings if f["id"] not in placed]
-        if rest and phases:
-            lay.addWidget(self._phase_block(
-                {"name": "Other findings", "when": "",
-                 "desc": "Not attributed to a phase of the incident."}, rest))
-        elif rest:
-            for f in rest:
-                card = self._card(f)
-                self.cards[f["id"]] = card
-                lay.addWidget(card)
+        for group, items in self._groups(findings):
+            lay.addWidget(self._phase_block(group, items))
 
         if self._overflow > 0:
             note = w.body(
@@ -170,6 +192,50 @@ class FindingsScreen(Screen):
         msg.setMaximumWidth(420)
         v.addWidget(msg, 0, Qt.AlignCenter)
         return box
+
+    def _groups(self, findings):
+        """[(group, items)] in reading order — the spine the screen renders.
+
+        Phases when the case carries them (the demo fixture, and any case whose
+        findings were phase-mapped); severity bands otherwise, which every case
+        can support. Either way nothing is dropped: findings a partial phase
+        mapping left behind get their own group rather than disappearing.
+        """
+        phases = self.case.get("phases") or []
+        groups, placed = [], set()
+
+        for phase in phases:
+            items = [f for f in findings if f.get("phase") == phase["n"]]
+            if not items:
+                continue
+            placed.update(f["id"] for f in items)
+            groups.append((dict(phase), items))
+
+        rest = [f for f in findings if f["id"] not in placed]
+        if not rest:
+            return groups
+
+        if phases:
+            groups.append((
+                {"name": "Other findings", "when": _time_span(rest),
+                 "desc": "Not attributed to a phase of the incident."}, rest))
+            return groups
+
+        for key, name, desc in _SEV_BANDS:
+            items = [f for f in rest if str(f.get("sev", "")).upper() == key]
+            if items:
+                groups.append((
+                    {"name": f"{name} · {len(items)}", "when": _time_span(items),
+                     "desc": desc}, items))
+        # Any severity the pipeline emits that is not one of the four bands.
+        banded = {key for key, _n, _d in _SEV_BANDS}
+        other = [f for f in rest if str(f.get("sev", "")).upper() not in banded]
+        if other:
+            groups.append((
+                {"name": f"Unclassified · {len(other)}", "when": _time_span(other),
+                 "desc": "The rule that raised these recorded no severity."},
+                other))
+        return groups
 
     def _phase_block(self, ph, items):
         """One phase: spine marker + connector, header, then its findings."""

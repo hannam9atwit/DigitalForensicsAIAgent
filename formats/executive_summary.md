@@ -17,13 +17,21 @@ Rules:
   "The output appears", "Here is", "This section describes", or "Based on the
   data provided".
 - Plain prose. No markdown, no bullets, no code formatting, no em-dashes.
-- All timestamps as human dates (2026-06-03 19:18), never epoch numbers.
-- Numbers must match the case data exactly and agree with each other.
+- All timestamps as human dates (YYYY-MM-DD HH:MM), never epoch numbers.
+- Every count, ID, title and score must be copied from the case data and must
+  agree with the other numbers you state. Do not round, estimate, or supply a
+  number the case data does not give.
 - Attribute actions to accounts, never to named people.
 
-EXAMPLE OF CORRECT OUTPUT:
-This examination covered one disk image and interpreted 38 events. The
-analysis produced one critical finding: an abnormal $BadClus stream of
-516,554,240 bytes, a known location for concealing data from normal file
-listings. The overall assessed risk is high (72/100), driven by evidence
-consistent with deliberate concealment.
+SHAPE OF A CORRECT PARAGRAPH — structure only. Each bracketed item marks a slot
+filled from the case data; never write a bracketed placeholder itself, and never
+reuse a value from this example:
+
+    This examination covered [COUNT] artifacts and interpreted [COUNT] events.
+    The analysis produced [COUNT] critical findings, the most significant being
+    [ID], [FINDING], which is a known technique for concealing data from normal
+    file listings. The overall assessed risk is [LEVEL] ([COUNT]/100), driven by
+    evidence consistent with deliberate concealment.
+
+If the case produced no findings, say so directly and state the risk level as
+the case data records it, rather than describing a finding that does not exist.

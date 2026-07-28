@@ -91,6 +91,10 @@ class MainWindow(QMainWindow):
         # The background deep dive: at most one runs at a time, owned here so it
         # outlives screen rebuilds; None when idle.
         self._dive = None
+        # True between starting the pipeline and its finished/error signal, so a
+        # second Run / Re-run Analysis cannot start a concurrent run over the
+        # same builder.
+        self._analysis_running = False
 
         from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
@@ -510,11 +514,35 @@ class MainWindow(QMainWindow):
         self.go("evidence")
 
     def run_analysis(self):
+        # The demo is a fixture with no builder and no files behind its five
+        # artifacts, so there is nothing to re-analyze. Saying "create a case and
+        # add evidence first" while a case with artifacts is plainly on screen
+        # reads as the command being broken; say what is actually true.
+        if not self.builder and self.case.get("demo"):
+            QMessageBox.information(
+                self, "Demo case",
+                "The demo case is a fixture — its artifacts are illustrative and "
+                "have no files behind them, so there is nothing to re-analyze.\n\n"
+                "Create a case (File ▸ New Case) to run the pipeline on real "
+                "evidence.")
+            return
         if not self.builder or not self.builder.evidence:
             QMessageBox.information(self, "Nothing to analyze",
                                     "Create a case and add evidence first.")
             return
+        # One pipeline at a time. Picking the menu item again while a run is in
+        # flight used to start a second QThread over the SAME builder: both
+        # mutated its evidence records and its analysis dict concurrently, and
+        # both called _analysis_done, rebuilding the screen stack twice. Whether
+        # that produced stale results or a crash depended on timing.
+        if self._analysis_running:
+            self.statusBar().showMessage(
+                "Analysis is already running — it will finish shortly", 4000)
+            return
+
         self._cancel_deep_dive()   # a re-run supersedes any dive in flight
+        self._reset_analysis_results()
+        self._analysis_running = True
         self.show_analyzing()
         # Local refs, not self.thread/self.worker: a second run must never
         # overwrite (and so free) a thread that is still running. thread_registry
@@ -537,12 +565,33 @@ class MainWindow(QMainWindow):
         thread_registry.track(thread, worker)
         thread.start()
 
+    def _reset_analysis_results(self):
+        """Drop everything the previous run produced, before the new one starts.
+
+        A re-run replaces prior results; it does not merge with them. The
+        pipeline already returns a fresh analysis dict, but the knowledge base
+        and the per-artifact parser stats are read from the case and the evidence
+        records in the meantime, so a dive entry or an event count from the old
+        run could still be on screen (or get persisted) while the new run is in
+        flight. Clearing them here makes the replacement explicit rather than
+        incidental.
+        """
+        for artifact in (self.builder.evidence if self.builder else []):
+            artifact["events"] = 0
+            artifact["parser"] = "—"
+            artifact["detail"] = "Pending analysis"
+        if self.builder and isinstance(self.builder.analysis, dict):
+            self.builder.analysis["knowledge_base"] = []
+        self.case["knowledge_base"] = []
+        self.case["synthesis"] = {}
+
     def _analysis_log(self, msg):
         self.statusBar().showMessage(f"● PIPELINE RUNNING — {msg}")
         if getattr(self, "_analyzing", None):
             self._analyzing.set_log(msg)
 
     def _analysis_done(self, builder):
+        self._analysis_running = False
         self.builder = builder
         self.case = builder.to_case()
         self._enter_case()
@@ -636,13 +685,23 @@ class MainWindow(QMainWindow):
     def _dive_persist(self):
         """Persist the growing knowledge base at a milestone, OFF the UI thread
         (the case zip embeds the whole event list, so an on-thread write would
-        hitch the UI). Serializes a consistent snapshot on a background task."""
-        if not self.builder:
+        hitch the UI). Serializes a consistent snapshot on a background task.
+
+        Guarded on the sender like the other dive callbacks: a superseded dive
+        finishes the prompt it is inside before it notices the cancel, and an
+        unguarded milestone from it would snapshot the builder in the middle of
+        a re-analysis and write that over the saved case.
+        """
+        if self.sender() is not self._dive or not self.builder:
             return
+        if self._analysis_running:
+            return          # the pipeline is rewriting the builder right now
         from .case_store import save_case_async
         save_case_async(self.builder, self._bg_tasks)
 
     def _dive_log(self, msg):
+        if self.sender() is not self._dive:
+            return          # a superseded dive must not narrate over the new one
         self.statusBar().showMessage(f"● {msg}", 6000)
 
     def _dive_finished(self, result):
@@ -717,6 +776,7 @@ class MainWindow(QMainWindow):
                 pass
 
     def _analysis_error(self, msg):
+        self._analysis_running = False
         # Keep the case open on Evidence rather than dropping the examiner back
         # to an empty launch screen — the artifacts are still registered.
         if self.builder:

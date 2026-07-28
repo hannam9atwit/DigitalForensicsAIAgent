@@ -281,7 +281,7 @@ class _Viewer(QFrame):
         # tier before a parse finishes, the arriving result no longer matches
         # and is dropped.
         self._token = f"{e['id']}:{tier}"
-        self._rendered_shown = self.RENDER_PAGE
+        self._rendered_offset = 0
         w.clear_layout(self._body)
         self._title.setText(f"{e['name']} · {e.get('kindLabel', '')} · "
                             f"{TIERS[tier - 1][0]}")
@@ -289,10 +289,17 @@ class _Viewer(QFrame):
         kind_by_tier = {1: "raw", 2: "records", 3: "tree"}
         self._show_loading(tier)
 
-        self._job = ViewerJob()
-        self._job.result_ready.connect(self._on_result)
-        self._job.run(kind_by_tier[tier], self._token,
-                      e.get("_path", ""), e.get("kind", ""))
+        # Anchor the job against garbage collection for as long as its daemon
+        # thread may still emit. Overwriting a single `self._job` dropped the
+        # previous job's last reference the instant the user switched tier, so a
+        # parse still in flight emitted from a QObject Python had already
+        # collected — losing the result at best. Recent jobs are kept; the token
+        # check above is what makes their late results harmless.
+        job = ViewerJob()
+        job.result_ready.connect(self._on_result)
+        self._jobs = getattr(self, "_jobs", [])[-4:] + [job]
+        job.run(kind_by_tier[tier], self._token,
+                e.get("_path", ""), e.get("kind", ""))
 
     def _show_loading(self, tier):
         """Immediate responsive placeholder while the parse runs off-thread.
@@ -328,6 +335,10 @@ class _Viewer(QFrame):
     def _on_result(self, token, result):
         if token != self._token:
             return  # stale: user moved on before this parse finished
+        try:
+            self._body.count()
+        except RuntimeError:
+            return  # the viewer was rebuilt (case re-analyzed) while parsing
         w.clear_layout(self._body)
         e = self._current
         if self._current_tier == 1:
@@ -465,34 +476,38 @@ class _Viewer(QFrame):
         self._body.addLayout(head)
         self._body.addWidget(w.hline(P["line"]))
 
-        # Realize a page of rows, not all of them: even after the parse is
-        # off-thread, building a nested layout per row is real UI-thread work.
-        # A "show more" button reveals the next page, like the timeline screen.
+        # Realize a fixed WINDOW of rows, not a growing prefix. The UI-thread
+        # cost of a realized table is superlinear in the number of rows on
+        # screen — measured in this viewer at 85ms for 60 rows, 0.5s for 180 and
+        # 3.6s for 500 — so a "show more" that accumulated pages walked straight
+        # back into the freeze this screen just got fixed. Paging a window keeps
+        # every render at one page's cost no matter how large the capture, and
+        # unlike a cap it leaves every row reachable.
         self._rendered_rows = result["rows"]
         self._rendered_columns = result["columns"]
         self._rendered_note = result["note"]
-        self._rendered_shown = getattr(self, "_rendered_shown", 0) or self.RENDER_PAGE
-        visible = result["rows"][:self._rendered_shown]
+        total_rows = len(result["rows"])
+        offset = getattr(self, "_rendered_offset", 0)
+        offset = max(0, min(offset, max(0, total_rows - 1)))
+        self._rendered_offset = offset
+        visible = result["rows"][offset:offset + self.RENDER_PAGE]
         for record in visible:
             row = QHBoxLayout()
             row.setContentsMargins(0, 6, 0, 6)
             row.setSpacing(12)
             for cell in record:
-                row.addWidget(
-                    w.body(str(cell), size=11.5, weight=theme.W_REGULAR, lh=1.3), 1)
+                # w.TableCell, not w.body: the wrapped rich-text cells this used
+                # to build made the row a height-for-width solve, which cost
+                # seconds of Qt layout on a capture's worth of rows. See the
+                # widget's docstring.
+                row.addWidget(w.TableCell(cell, size=11.5,
+                                          weight=theme.W_REGULAR), 1)
             self._body.addLayout(row)
             self._body.addWidget(w.hline())
 
-        remaining = len(result["rows"]) - len(visible)
-        if remaining > 0:
-            from PySide6.QtWidgets import QPushButton
-            from PySide6.QtGui import QCursor
-            step = min(self.RENDER_PAGE, remaining)
-            more = QPushButton(f"Show {step} more  ·  {remaining} not shown")
-            more.setObjectName("pill")
-            more.setCursor(QCursor(Qt.PointingHandCursor))
-            more.clicked.connect(self._show_more_rendered)
-            self._body.addWidget(more)
+        if total_rows > self.RENDER_PAGE:
+            self._body.addWidget(self._rendered_pager(offset, len(visible),
+                                                      total_rows))
 
         caption = result["note"]
         if caption:
@@ -501,10 +516,36 @@ class _Viewer(QFrame):
 
     RENDER_PAGE = 60
 
-    def _show_more_rendered(self):
-        self._rendered_shown = getattr(self, "_rendered_shown", self.RENDER_PAGE) \
-            + self.RENDER_PAGE
-        # Re-render tier 2 from the cached rows without re-parsing.
+    def _rendered_pager(self, offset, shown, total):
+        """Previous / position / Next for the rendered record window."""
+        from PySide6.QtWidgets import QPushButton
+        from PySide6.QtGui import QCursor
+
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 8, 0, 0)
+        row.setSpacing(10)
+
+        def button(text, enabled, step):
+            btn = QPushButton(text)
+            btn.setObjectName("pill")
+            btn.setEnabled(enabled)
+            if enabled:
+                btn.setCursor(QCursor(Qt.PointingHandCursor))
+                btn.clicked.connect(lambda _=False, s=step: self._page_rendered(s))
+            return btn
+
+        row.addWidget(button("← Previous", offset > 0, -self.RENDER_PAGE))
+        row.addWidget(w.label(
+            f"{offset + 1:,}–{offset + shown:,} of {total:,}",
+            size=11, mono=True, color=P["text3"]))
+        row.addWidget(button("Next →", offset + shown < total, self.RENDER_PAGE))
+        row.addStretch(1)
+        return bar
+
+    def _page_rendered(self, step):
+        """Move the window and re-render from the cached rows — no re-parse."""
+        self._rendered_offset = max(0, getattr(self, "_rendered_offset", 0) + step)
         w.clear_layout(self._body)
         self._tier2(self._current,
                     {"columns": self._rendered_columns, "rows": self._rendered_rows,

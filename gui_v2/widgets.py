@@ -118,6 +118,53 @@ def mono(text="", size=11, weight=theme.W_REGULAR, color=None, wrap=False):
                  mono=True, wrap=wrap)
 
 
+class TableCell(QLabel):
+    """One cell of a record table: plain text, single line, elided to fit.
+
+    Why this exists rather than body(): body() renders rich text with word wrap,
+    so every cell is a height-for-width widget. In a row of equal-stretch cells
+    inside a scroll area, Qt has to re-lay out each cell's text document on every
+    trial width while it solves the row — and the solve is superlinear in the
+    number of such widgets. Sixty rows of five wrapped rich-text cells measured
+    at ~3 seconds of pure C++ layout, with no Python frames to show for it, which
+    is exactly the pcap "rendered view" freeze.
+
+    Table values (times, addresses, ports) are single-line by nature, so the
+    wrapping bought nothing. Elision happens at paint time against the width the
+    layout already chose, so it costs nothing to lay out, and the full value
+    stays available in the tooltip.
+    """
+
+    def __init__(self, text="", size=11.5, weight=theme.W_REGULAR, color=None,
+                 parent=None):
+        super().__init__(parent)
+        self._full = str(text)
+        self.setTextFormat(Qt.PlainText)
+        self.setWordWrap(False)
+        self.setFont(_font(size, weight))
+        self.setStyleSheet(f"color: {color or P['text']}; background: transparent;")
+        # Ignored width: the cell takes the width its column is given instead of
+        # demanding its text's natural width, so one long value cannot widen the
+        # table or force a horizontal scrollbar.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setToolTip(self._full)
+
+    def text(self):
+        return self._full
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(0)
+        return hint
+
+    def paintEvent(self, event):
+        metrics = QFontMetricsF(self.font())
+        elided = metrics.elidedText(self._full, Qt.ElideRight, self.width())
+        if elided != super().text():
+            QLabel.setText(self, elided)
+        super().paintEvent(event)
+
+
 class ThinkingLabel(QLabel):
     """A label that counts elapsed seconds while an AI generation runs, so a
     slow local model reads as work — "Thinking… 12s" — rather than a hang.
