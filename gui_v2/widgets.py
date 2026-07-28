@@ -14,7 +14,9 @@ handled here once rather than at every call site:
                      which is the closest Qt gets to the design's selection ring.
 """
 
-from PySide6.QtCore import Qt, Signal, QSize
+import time
+
+from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from PySide6.QtGui import QFont, QCursor, QFontMetricsF
 from PySide6.QtWidgets import (
     QFrame, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -114,6 +116,43 @@ def body(text="", size=13, weight=theme.W_LIGHT, color=None, lh=1.55, wrap=True,
 def mono(text="", size=11, weight=theme.W_REGULAR, color=None, wrap=False):
     return label(text, size=size, weight=weight, color=color or P["text2"],
                  mono=True, wrap=wrap)
+
+
+class ThinkingLabel(QLabel):
+    """A label that counts elapsed seconds while an AI generation runs, so a
+    slow local model reads as work — "Thinking… 12s" — rather than a hang.
+
+    start() begins counting from now; stop() freezes it. The one-second tick is
+    a QTimer owned by the label, so it is torn down with the widget. Elapsed
+    time is read from a monotonic clock rather than counted in ticks, so a busy
+    event loop never makes the number drift.
+    """
+
+    def __init__(self, prefix="Thinking", size=12.5, color=None, parent=None):
+        super().__init__(parent)
+        self._prefix = prefix
+        self._start = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._refresh)
+        self.setFont(_font(size, theme.W_LIGHT))
+        self.setStyleSheet(f"color: {color or P['text3']}; background: transparent;")
+        self._refresh()
+
+    def start(self):
+        self._start = time.monotonic()
+        self._refresh()
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+
+    def _refresh(self):
+        if self._start is None:
+            self.setText(f"{self._prefix}…")
+            return
+        seconds = int(time.monotonic() - self._start)
+        self.setText(f"{self._prefix}… {seconds}s")
 
 
 # ── surfaces ──────────────────────────────────────────────────────────────────

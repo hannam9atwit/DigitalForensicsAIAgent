@@ -158,8 +158,10 @@ class EvidenceScreen(Screen):
         for k, c in self.art_cards.items():
             c.set_selected(k == eid)
         self._refresh_viewer()
+        # No AI call on selection: on a local CPU model that is 30-90s, so
+        # every click would feel frozen. The rail offers an "Explain with AI"
+        # action instead (see rail()); results still cache per artifact.
         self.push_rail()
-        self._request_ai_meaning()
 
     def set_tier(self, tier):
         self.tier = tier
@@ -177,12 +179,14 @@ class EvidenceScreen(Screen):
             self.viewer.show_artifact(e, self.tier, self.case)
 
     def _request_ai_meaning(self):
-        """Generate the "what it means" note for the selected artifact.
+        """Generate the "what it means" note for the selected artifact — only
+        when the examiner asks for it, via the rail's "Explain with AI" action.
 
         The deterministic plain/role text is already on screen; when the model
         finishes — and the user is still on the same artifact — push_rail()
         swaps the richer interpretation in. Results cache on the artifact dict
-        so re-selection is instant.
+        so a second view is instant. On a real case with no reachable model the
+        job returns empty and the action simply reappears for a retry.
         """
         artifact = self.find_artifact(self.sel)
         if not artifact or artifact.get("ai_meaning") or not self.ai_config:
@@ -218,11 +222,27 @@ class EvidenceScreen(Screen):
             blocks.append(("WHAT IT MEANS", e["ai_meaning"]))
         blocks.append(EVIDENCE_SAFE_BLOCK)
 
+        # Offer AI interpretation on demand rather than firing it on selection.
+        # Only when an engine is configured and it hasn't already been drafted.
+        action_label = ""
+        action = None
+        if not e.get("ai_meaning") and self._ai_available():
+            action_label = "✨ Explain with AI"
+            action = self._request_ai_meaning
+
         return RailPayload(
             title=f"{e['name']} — in plain terms",
             blocks=blocks,
             steps=list(EVIDENCE_STEPS),
+            action_label=action_label,
+            action=action,
         )
+
+    def _ai_available(self) -> bool:
+        """True when an AI engine is configured (not the rule-based-only mode),
+        so the rail should offer to explain the artifact."""
+        config = self.ai_config or {}
+        return bool(config) and config.get("provider") != "none"
 
 
 class _Viewer(QFrame):
