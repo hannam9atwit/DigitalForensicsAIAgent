@@ -88,6 +88,9 @@ class MainWindow(QMainWindow):
         # Every in-flight BackgroundTask is held here until it signals finished,
         # so a task is never freed (nor overwritten by a later one) mid-run.
         self._bg_tasks = set()
+        # The background deep dive: at most one runs at a time, owned here so it
+        # outlives screen rebuilds; None when idle.
+        self._dive = None
 
         from . import app_settings
         self.settings = {"examiner": "", "examiner_id": "", "agency": "",
@@ -156,6 +159,8 @@ class MainWindow(QMainWindow):
 
         cm = mb.addMenu("Case")
         cm.addAction(QAction("Run / Re-run Analysis", self, triggered=self.run_analysis))
+        cm.addAction(QAction("Stop Background Analysis", self,
+                             triggered=self._cancel_deep_dive))
         cm.addAction(QAction("Re-verify Hashes", self, triggered=self.verify_hashes))
         cm.addSeparator()
         cm.addAction(QAction("Open Demo Case", self, triggered=self.open_demo))
@@ -174,11 +179,20 @@ class MainWindow(QMainWindow):
         hm.addAction(QAction("About", self, triggered=self._about))
 
     def _menu_corner(self):
-        """Right side of the menu bar: the open case, then the offline state."""
+        """Right side of the menu bar: the deep-dive status, the open case, then
+        the offline state."""
         box = QWidget()
         h = QHBoxLayout(box)
         h.setContentsMargins(0, 0, 12, 0)
         h.setSpacing(14)
+        # Unobtrusive, persistent deep-dive status ("AIR is analysing … ~12 min").
+        # Hidden until a dive starts; cleared on completion.
+        self._dive_status = QLabel("")
+        self._dive_status.setStyleSheet(
+            f"color: {P['accent']}; font-family: {theme.MONO_STACK}; "
+            f"font-size: 10px; font-weight: 600;")
+        self._dive_status.setVisible(False)
+        h.addWidget(self._dive_status)
         self._menu_case = QLabel("")
         self._menu_case.setStyleSheet(
             f"color: {P['text3']}; font-family: {theme.MONO_STACK}; font-size: 10px;")
@@ -200,6 +214,7 @@ class MainWindow(QMainWindow):
         self.screens.clear()
 
     def show_launch(self):
+        self._cancel_deep_dive()
         self._clear_stack()
         self.sidebar.hide()
         self.rail.hide()
@@ -253,6 +268,7 @@ class MainWindow(QMainWindow):
             self.open_case_history()
 
     def open_demo(self):
+        self._cancel_deep_dive()
         self.builder = None
         self.case = content.demo_case()
         self._enter_case()
@@ -286,6 +302,7 @@ class MainWindow(QMainWindow):
         self.screens["settings"].changed.connect(self._settings_changed)
         self.screens["report"].export_requested.connect(self.export_report)
         self.screens["report"].narrative_updated.connect(self._narrative_regenerated)
+        self.screens["report"].resynthesize_requested.connect(self._resynthesize)
         self.screens["chat"].asked.connect(self._log_question)
 
         self._refresh_sidebar()
@@ -497,6 +514,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nothing to analyze",
                                     "Create a case and add evidence first.")
             return
+        self._cancel_deep_dive()   # a re-run supersedes any dive in flight
         self.show_analyzing()
         # Local refs, not self.thread/self.worker: a second run must never
         # overwrite (and so free) a thread that is still running. thread_registry
@@ -537,6 +555,166 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Analysis complete — {self.case['caseMeta']['id']} — "
             f"{len(self.case['findings'])} findings", 8000)
+        # The case is fully usable now; the deep dive runs in the background.
+        self._start_deep_dive()
+
+    # ── deep dive (background knowledge base) ──────────────────────────────────
+
+    def _start_deep_dive(self):
+        """Launch the background dive that digests the case into the knowledge
+        base. Resumes from any entries already persisted, so a re-open or a
+        prior cancel continues rather than restarting."""
+        if not self.builder or not isinstance(self.builder.analysis, dict):
+            return
+        if self._ai_config().get("provider") == "none":
+            return
+        if self._dive is not None:                       # one dive at a time
+            return
+
+        analysis = self.builder.analysis
+        existing = analysis.get("knowledge_base", []) or []
+        events = analysis.get("events", [])
+        if not events and not self.case.get("findings"):
+            return                                       # nothing to dive into
+
+        if existing and len(existing) >= self._dive_total_estimate():
+            return                                       # already fully dived
+
+        from .deep_dive_worker import DeepDiveWorker
+        worker = DeepDiveWorker(self.case, events, self._ai_config(),
+                                existing_entries=existing)
+        worker.entry_ready.connect(self._dive_entry)
+        worker.progress.connect(self._dive_progress)
+        worker.milestone.connect(self._dive_persist)
+        worker.log.connect(self._dive_log)
+        worker.finished.connect(self._dive_finished)
+        self._dive = worker
+        self.builder._log("DEEP_DIVE_STARTED",
+                          f"Background analysis started · {len(existing)} insight(s) "
+                          f"already present", who="system")
+        self._dive_status.setText("● AIR is analysing the evidence…")
+        self._dive_status.setVisible(True)
+        worker.start()
+
+    def _dive_total_estimate(self):
+        """Upper bound on dive entries, for the 'already complete?' short-circuit."""
+        try:
+            from ai.deep_dive import DeepDive
+            return len(DeepDive(self.case, [], lambda _p: "").plan())
+        except Exception:
+            return 10 ** 9
+
+    def _dive_entry(self, entry):
+        """A finished KB entry arrived (UI thread). Fold it into the case and the
+        persisted analysis, and refresh any open AI surface in place."""
+        if self.sender() is not self._dive:             # a superseded dive
+            return
+        if not self.builder or not isinstance(self.builder.analysis, dict):
+            return
+        self.builder.analysis.setdefault("knowledge_base", []).append(entry)
+        self.case.setdefault("knowledge_base", []).append(entry)
+        from .data_adapter import apply_knowledge_base
+        apply_knowledge_base(self.case)
+        for sid in ("case", "findings", "report"):
+            screen = self.screens.get(sid)
+            if screen is not None and hasattr(screen, "refresh_ai"):
+                screen.refresh_ai()
+
+    def _dive_progress(self, done, total, eta_seconds):
+        if self.sender() is not self._dive:
+            return
+        if eta_seconds is None:
+            self._dive_status.setText(
+                f"● AIR is analysing the evidence… {done}/{total}")
+        else:
+            minutes = max(1, round(eta_seconds / 60))
+            self._dive_status.setText(
+                f"● AIR is analysing — deep insights in about {minutes} min "
+                f"({done}/{total})")
+        self._dive_status.setVisible(True)
+
+    def _dive_persist(self):
+        """Persist the growing knowledge base at a milestone, OFF the UI thread
+        (the case zip embeds the whole event list, so an on-thread write would
+        hitch the UI). Serializes a consistent snapshot on a background task."""
+        if not self.builder:
+            return
+        from .case_store import save_case_async
+        save_case_async(self.builder, self._bg_tasks)
+
+    def _dive_log(self, msg):
+        self.statusBar().showMessage(f"● {msg}", 6000)
+
+    def _dive_finished(self, result):
+        if self.sender() is not self._dive:             # a superseded dive
+            return
+        self._dive = None
+        if self.builder and isinstance(self.builder.analysis, dict):
+            try:
+                from .case_store import save_case
+                save_case(self.builder)
+            except Exception:
+                pass
+        count = len(self.case.get("knowledge_base", []))
+        if result == "complete":
+            self._dive_status.setVisible(False)
+            self._dive_status.setText("")
+            if self.builder:
+                self.builder._log("DEEP_DIVE_COMPLETE",
+                                  f"Knowledge base built · {count} insight(s)",
+                                  who="system")
+            self.statusBar().showMessage("Deep analysis complete", 6000)
+        elif result == "unavailable":
+            self._dive_status.setText("● AI unavailable — partial insights kept")
+            self._dive_status.setVisible(True)
+            if self.builder:
+                self.builder._log("DEEP_DIVE_DEGRADED",
+                                  f"Model became unavailable · {count} insight(s) kept",
+                                  who="system")
+        else:  # cancelled
+            self._dive_status.setVisible(False)
+            self._dive_status.setText("")
+            if self.builder:
+                self.builder._log("DEEP_DIVE_CANCELLED",
+                                  f"Cancelled · {count} insight(s) kept", who="system")
+
+    def _resynthesize(self):
+        """Re-run the synthesis: drop the layer-3 entries and resume the dive,
+        which regenerates them from the retained layer-1/2 digest. Reuses the
+        dive's own resume machinery — no separate narrative path."""
+        if not self.builder or not isinstance(self.builder.analysis, dict):
+            return
+        self._cancel_deep_dive()
+        kb_list = self.builder.analysis.get("knowledge_base", []) or []
+        kept = [e for e in kb_list if e.get("layer") != 3]
+        self.builder.analysis["knowledge_base"] = kept
+        self.case["knowledge_base"] = list(kept)
+        from .data_adapter import apply_knowledge_base
+        apply_knowledge_base(self.case)
+        for sid in ("case", "findings", "report"):
+            screen = self.screens.get(sid)
+            if screen is not None and hasattr(screen, "refresh_ai"):
+                screen.refresh_ai()
+        self._start_deep_dive()
+
+    def _cancel_deep_dive(self):
+        """Stop the dive (case change, close, or explicit request). The worker
+        keeps whatever it finished; nulling self._dive makes any late signal
+        from it a no-op via the sender guards, so it can't touch a new case."""
+        if self._dive is None:
+            return
+        self._dive.cancel()
+        self._dive = None
+        self._dive_status.setVisible(False)
+        self._dive_status.setText("")
+        if self.builder:
+            try:
+                self.builder._log("DEEP_DIVE_CANCELLED",
+                                  "Background analysis stopped", who="system")
+                from .case_store import save_case_async
+                save_case_async(self.builder, self._bg_tasks)
+            except Exception:
+                pass
 
     def _analysis_error(self, msg):
         # Keep the case open on Evidence rather than dropping the examiner back
@@ -601,12 +779,15 @@ class MainWindow(QMainWindow):
             on_error=lambda msg: QMessageBox.critical(self, "Open failed", msg))
 
     def _case_loaded(self, builder):
+        self._cancel_deep_dive()   # stop any dive from a previously-open case
         self.builder = builder
         self.case = builder.to_case()
         self._enter_case()
         self.go("case" if self.case.get("findings") else "evidence")
         self.statusBar().showMessage(
             f"Opened case {self.case['caseMeta']['id']}", 5000)
+        # Resume the dive from whatever the knowledge base already holds.
+        self._start_deep_dive()
 
     # ── report / evidence export ──────────────────────────────────────────────
 
@@ -782,7 +963,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Stop and join any live QThread workers before the window (and then
         the interpreter) tears down, so a still-running thread is never
-        collected. Daemon-thread jobs (BackgroundTask, viewer, ai) die with the
-        process on their own and need no join."""
+        collected. Daemon-thread jobs (BackgroundTask, viewer, ai, deep dive)
+        die with the process on their own and need no join."""
+        self._cancel_deep_dive()
         thread_registry.shutdown()
         super().closeEvent(event)
