@@ -96,7 +96,8 @@ class ReportScreen(Screen):
     id = "report"
 
     export_requested = Signal()
-    narrative_updated = Signal(object)   # {"markdown", "ai_status"} after a re-draft
+    narrative_updated = Signal(object)     # {"markdown", "ai_status"} after a re-draft
+    resynthesize_requested = Signal()      # re-run the deep dive's synthesis
 
     def __init__(self, case, parent=None):
         super().__init__(case, parent)
@@ -159,70 +160,55 @@ class ReportScreen(Screen):
         self._banner_lay.setSpacing(3)
         row.addWidget(self._banner_box, 1)
 
-        self._regen_btn = w.link_button("Regenerate narrative", self._regenerate)
-        if not self.case.get("narrativeInput"):
+        self._regen_btn = w.link_button("Regenerate from deep analysis",
+                                        self._regenerate)
+        if not (self.case.get("knowledge_base") or self.case.get("narrativeInput")):
             self._regen_btn.setEnabled(False)
-            self._regen_btn.setToolTip("Run the analysis first to draft a narrative.")
+            self._regen_btn.setToolTip("Run the analysis first.")
         row.addWidget(self._regen_btn, 0, Qt.AlignTop)
 
         self._render_banner()
         return host
 
     def _render_banner(self):
-        """Draw the honesty banner from the case's current AI status.
-
-        This whole screen frames the narrative as the model's draft, so when the
-        model did not run — or timed out on some sections — that has to be
-        visible before the examiner reads a word of it: green when the local
-        model drafted it, amber when it fell back to rule-based text.
-        """
+        """Draw the honesty banner from the deep dive's synthesis state, so the
+        examiner knows whether the report's summary and conclusion are the
+        model's reading of the evidence or the deterministic fallback."""
         w.clear_layout(self._banner_lay)
-        status = (self.case.get("narrative") or {}).get("ai_status")
-        if not status:
-            return
+        if self.case.get("demo"):
+            return   # the fixture ships curated prose; no dive status applies
+        synthesis = self.case.get("synthesis") or {}
+        drafted = bool(synthesis.get("executive_summary")
+                       or synthesis.get("conclusion"))
 
         frame = QFrame()
         v = QVBoxLayout(frame)
         v.setContentsMargins(13, 10, 13, 10)
         v.setSpacing(3)
-
-        if status.get("used_llm"):
+        if drafted:
             frame.setObjectName("noticeGood")
-            model = status.get("model") or "the local model"
-            degraded = status.get("degraded") or []
-            line = f"✓ Drafted by {model}"
-            if degraded:
-                line += (f" · {len(degraded)} section"
-                         f"{'' if len(degraded) == 1 else 's'} rule-based (timed out)")
-            v.addWidget(w.body(line, size=12, color=P["good"], lh=1.4))
-            if degraded:
-                v.addWidget(w.body("Timed out: " + ", ".join(degraded),
-                                   size=10.5, color=P["text3"], lh=1.4))
+            v.addWidget(w.body(
+                "✓ Summary and conclusion drawn from the deep analysis of the "
+                "evidence.", size=12, color=P["good"], lh=1.4))
         else:
             frame.setObjectName("noticeWarn")
-            reason = status.get("reason") or "the local model was unavailable"
-            v.addWidget(w.body(f"⚠ Rule-based — AI unavailable: {reason}",
-                               size=12, color=P["sevMedium"], lh=1.4))
-            detail = (status.get("detail") or "").strip()
-            if detail:
-                v.addWidget(w.body(detail, size=10.5, color=P["text3"], lh=1.4))
+            v.addWidget(w.body(
+                "⚠ Deterministic summary — the deep analysis has not produced "
+                "the narrative yet.", size=12, color=P["sevMedium"], lh=1.4))
         self._banner_lay.addWidget(frame)
 
     def _regenerate(self):
-        """Re-draft the narrative off the UI thread, showing per-section
-        progress. Disabled while a draft is in flight so it can't overlap."""
-        narrative_input = self.case.get("narrativeInput")
-        if not narrative_input:
-            return
-        self._regen_btn.setEnabled(False)
-        self._show_progress("preparing", 0, 10)
+        """Re-run the deep dive's synthesis (layer 3) from the existing digest.
+        The window clears the synthesis entries and resumes the dive, which
+        regenerates them; the preview updates in place when they land."""
+        self.resynthesize_requested.emit()
 
-        job = _NarrativeJob(getattr(self, "ai_config", {}) or {}, narrative_input)
-        job.progress.connect(self._show_progress)
-        job.done.connect(self._regen_done)
-        job.failed.connect(self._regen_failed)
-        self._regen_job = job          # hold a reference so it outlives this call
-        job.start()
+    def refresh_ai(self):
+        """Called by the window as deep-dive synthesis arrives — re-render the
+        banner and the paper so the executive summary reflects the latest
+        synthesis without rebuilding the whole screen."""
+        self._render_banner()
+        self._render_paper()
 
     def _cancel_regen(self):
         """Cancel any in-flight re-draft. Reads only plain attributes so it is

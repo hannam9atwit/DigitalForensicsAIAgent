@@ -335,7 +335,7 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
     crit = sum(1 for f in findings if f["sev"] == "CRITICAL")
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    return {
+    case = {
         "loaded": True,
         "demo": False,
         "caseMeta": {
@@ -366,6 +366,7 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
         },
         "narrativeInput": narrative_input,
         "paragraph": None,          # CaseScreen writes its own summary instead
+        "knowledge_base": list(analysis.get("knowledge_base", [])),
         "report": {
             "title": REPORT_TITLE,
             "byline": (f"Examiner {meta['examiner']} ({meta['examinerId']}) · "
@@ -379,6 +380,49 @@ def reshape_case(meta: dict, evidence: list, audit: list, analysis) -> dict:
             "include": {f["id"]: True for f in findings},
         },
     }
+    # Fold in the deep dive's digest (executive summary / conclusion / overview /
+    # findings assessment) when the knowledge base carries synthesis entries.
+    apply_knowledge_base(case)
+    return case
+
+
+def apply_knowledge_base(case):
+    """(Re)derive the deep-dive-fed fields on `case` from case["knowledge_base"].
+
+    Called at reshape time (with any persisted KB) and again by MainWindow as
+    live entries arrive, so the report slots, the case overview, and the
+    findings reasoning all reflect the latest synthesis without a full reshape.
+    Deterministic fallbacks are left in place for slots the dive has not yet
+    produced, so every surface is usable on partial results.
+    """
+    from ai import knowledge_base as kb
+
+    knowledge = kb.KnowledgeBase.from_list(case.get("knowledge_base", []))
+    exec_summary = knowledge.slot_text(kb.TOPIC_EXECUTIVE_SUMMARY)
+    conclusion = knowledge.slot_text(kb.TOPIC_CONCLUSION)
+
+    synthesis = {
+        "narrative":           knowledge.slot_text(kb.TOPIC_CASE_NARRATIVE),
+        "findings_assessment": knowledge.slot_text(kb.TOPIC_FINDINGS_ASSESSMENT),
+        "overview":            knowledge.slot_text(kb.TOPIC_CASE_OVERVIEW),
+        "executive_summary":   exec_summary,
+        "conclusion":          conclusion,
+        "entry_count":         len(knowledge),
+    }
+    case["synthesis"] = synthesis
+
+    narrative = case.setdefault("narrative", {})
+    if exec_summary:
+        narrative["executive_summary"] = exec_summary
+    if conclusion:
+        narrative["conclusion"] = conclusion
+
+    # The report preview leads with the model's executive summary once the dive
+    # has written one; until then it keeps the deterministic summary.
+    if exec_summary:
+        from .report_pdf import _clean
+        case.setdefault("report", {})["summary"] = _clean(exec_summary)
+    return case
 
 
 def _summary(analysis, findings, evidence, pipeline):

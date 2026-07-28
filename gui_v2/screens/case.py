@@ -62,33 +62,23 @@ class CaseScreen(Screen):
 
     def on_show(self, arg=None):
         super().on_show(arg)
-        self._request_ai_overview()
+        self.refresh_ai()
 
-    def _request_ai_overview(self):
-        """Upgrade the overview paragraph with a model-written one.
-
-        The curated/deterministic paragraph shows instantly; the generated
-        paragraph replaces it when ready and is cached on the case dict so it
-        is written once per case, not once per visit.
-        """
-        if self.case.get("paragraphAI") or not self.ai_config:
+    def refresh_ai(self):
+        """Upgrade the overview paragraph with the deep dive's synthesis when it
+        is available. The curated/deterministic paragraph shows instantly; the
+        model's overview replaces it in place once the dive writes it — no
+        separate on-demand generation, so it never competes with the dive."""
+        if self._para_label is None:
             return
-        if not self.case.get("findings"):
+        overview = (self.case.get("synthesis") or {}).get("overview")
+        if not overview:
             return
-
-        from ..ai_worker import SurfaceJob
-        self._ai_job = SurfaceJob(self.ai_config)
-        self._ai_job.result_ready.connect(self._ai_overview_ready)
-        self._ai_job.run("overview", token="overview", fallback="",
-                         case=self.case)
-
-    def _ai_overview_ready(self, _token, text):
-        if not text or self._para_label is None:
-            return
-        self.case["paragraphAI"] = text
-        escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
+        escaped = (overview.replace("&", "&amp;").replace("<", "&lt;")
                    .replace(">", "&gt;"))
-        self._para_label.setText(escaped)
+        self._para_label.setText(
+            f'<div style="line-height:165%; font-family:{theme.SANS_STACK}; '
+            f'font-size:13px; color:{P["text"]};">{escaped}</div>')
 
     def _paragraph_card(self):
         card = w.Card(pad=17, spacing=8)

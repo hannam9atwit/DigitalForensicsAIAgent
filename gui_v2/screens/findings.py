@@ -74,6 +74,14 @@ class FindingsScreen(Screen):
             lay.addStretch(1)
             return
 
+        # The AI's reasoning over the findings as a whole — what they
+        # collectively indicate — drawn from the deep dive's synthesis. The
+        # deterministic finding list below renders immediately; this card shows
+        # a placeholder until the reasoning lands, then updates in place. The
+        # demo fixture has no dive, so it keeps the reference's clean layout.
+        if not self.case.get("demo"):
+            lay.addWidget(self._reasoning_card())
+
         # The phase spine is the demo case's narrative structure. A real
         # analysis has no notion of incident phases, and inventing them would
         # assert something the evidence does not say — so those findings render
@@ -110,6 +118,39 @@ class FindingsScreen(Screen):
 
         lay.addStretch(1)
         self.select(findings[0]["id"])
+
+    def _reasoning_card(self):
+        card = w.Card(pad=16, spacing=8)
+        card.head("WHAT THE EVIDENCE SHOWS")
+        self._assessment_label = w.body(self._assessment_text(), size=12.5,
+                                        color=P["text2"], lh=1.6)
+        card.add(self._assessment_label)
+        return card
+
+    def _assessment_text(self):
+        """The AI's collective reading of the findings when the dive has
+        produced it; otherwise an honest placeholder that says it is coming."""
+        synthesis = self.case.get("synthesis") or {}
+        text = synthesis.get("findings_assessment") or synthesis.get("narrative")
+        if text:
+            return text
+        count = len(self.case.get("findings", []))
+        return (f"{count} finding{'' if count == 1 else 's'} are listed below. "
+                f"The AI's reasoning over how they relate and what they "
+                f"collectively indicate will appear here once the background "
+                f"analysis reaches it.")
+
+    def refresh_ai(self):
+        """Called by the window as deep-dive insights arrive — swap the reasoning
+        text in without rebuilding the finding list."""
+        label = getattr(self, "_assessment_label", None)
+        if label is None:
+            return
+        text = self._assessment_text()
+        esc = (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+        label.setText(
+            f'<div style="line-height:160%; font-family:{theme.SANS_STACK}; '
+            f'font-size:12.5px; color:{P["text2"]};">{esc}</div>')
 
     def _zero_state(self):
         """A case with nothing to report still has to look finished, not broken."""

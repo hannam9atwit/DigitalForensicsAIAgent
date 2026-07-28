@@ -34,28 +34,73 @@ def _safe_name(case_id: str) -> str:
     return "".join(c if (c.isalnum() or c in keep) else "_" for c in case_id)
 
 
-def save_case(builder, directory=None) -> str:
-    """
-    Serialize a CaseBuilder to <dir>/<case_id>.forensic.
-    Stores metadata, evidence records (incl. hash + original path), the audit
-    trail, and the last analysis result so the case reopens fully populated.
+def _snapshot(builder, directory=None):
+    """A consistent, serialization-ready snapshot of the builder's state plus
+    the output path. Taken on the caller's thread so an off-thread writer sees
+    a stable picture: the small mutable lists (audit, knowledge base) are copied
+    now; the large, post-analysis-immutable events/findings are referenced.
     """
     directory = directory or app_data_dir()
     os.makedirs(directory, exist_ok=True)
     out = os.path.join(directory, _safe_name(builder.meta["id"]) + ".forensic")
 
+    analysis = builder.analysis
+    if isinstance(analysis, dict):
+        analysis = dict(analysis)
+        analysis["knowledge_base"] = list(analysis.get("knowledge_base", []))
+
     blob = {
-        "meta": builder.meta,
+        "meta": dict(builder.meta),
         "evidence": builder.evidence,          # includes "_path" + hashes
-        "analysis": builder.analysis,          # may be None if not analyzed yet
+        "analysis": analysis,                  # may be None if not analyzed yet
         "saved": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "schema": 1,
     }
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("case.json", json.dumps(blob, indent=2, default=str))
-        z.writestr("audit.jsonl", "\n".join(json.dumps(list(a)) for a in builder.audit))
+    audit_lines = [list(a) for a in builder.audit]
+    return out, blob, audit_lines
 
+
+def _write_forensic(out, blob, audit_lines):
+    """Write the zip atomically: build a temp then replace, so a crash or a
+    concurrent milestone write can never leave a half-written case file."""
+    tmp = f"{out}.{os.getpid()}.{id(blob)}.tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("case.json", json.dumps(blob, indent=2, default=str))
+        z.writestr("audit.jsonl",
+                   "\n".join(json.dumps(a) for a in audit_lines))
+    os.replace(tmp, out)   # atomic on the same filesystem
+    return out
+
+
+def save_case(builder, directory=None) -> str:
+    """
+    Serialize a CaseBuilder to <dir>/<case_id>.forensic.
+    Stores metadata, evidence records (incl. hash + original path), the audit
+    trail, and the last analysis result (including the knowledge base) so the
+    case reopens fully populated.
+    """
+    out, blob, audit_lines = _snapshot(builder, directory)
+    _write_forensic(out, blob, audit_lines)
     builder._log("CASE_SAVED", f"Case written to {os.path.basename(out)}", who="system")
+    return out
+
+
+def save_case_async(builder, task_set, directory=None):
+    """Persist off the UI thread. The snapshot is taken here (UI thread) so it
+    is consistent; the json serialization and zip write — the parts that scale
+    with the event count — run on a background task, so a milestone save during
+    the deep dive never hitches the interface. `task_set` keeps the task alive
+    until it finishes (see MainWindow._bg_tasks)."""
+    out, blob, audit_lines = _snapshot(builder, directory)
+
+    def work(_progress):
+        return _write_forensic(out, blob, audit_lines)
+
+    from .task_worker import BackgroundTask
+    task = BackgroundTask(work)
+    task_set.add(task)
+    task.finished.connect(lambda t=task: task_set.discard(t))
+    task.start()
     return out
 
 
