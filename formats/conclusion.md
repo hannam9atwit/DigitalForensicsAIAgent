@@ -17,5 +17,9 @@ Rules:
   data provided").
 - Calibrated language: "consistent with", "indicates", never certainty the
   evidence doesn't support.
-- Reference finding IDs when anchoring claims.
+- Reference finding IDs when anchoring claims, using only IDs present in the
+  supplied case data.
+- Name an account, file, device or time only where the case data establishes
+  it. Where the picture is incomplete, state what remains unestablished — a
+  conclusion that names its own gaps is stronger than one that fills them.
 - No markdown, no em-dashes. Do not restate every finding; synthesize.

@@ -18,7 +18,17 @@ Rules:
 - If the artifact is routine system noise, say so plainly and why.
 - Name the significance tier implicitly through word choice — "planning
   indicator", "routine", "central event" — never as a label.
+- Say only what the supplied artifact facts support. If they do not establish
+  an account, a device or a time, do not name one.
 
-EXAMPLE OF CORRECT OUTPUT:
-Research into moving large data to USB — a planning indicator recorded the
-day before the incident.
+SHAPE OF A CORRECT NOTE — structure only. Each bracketed item marks a slot
+filled from the supplied facts; never write a bracketed placeholder itself, and
+never reuse a value from this example:
+
+    Research into [TOPIC], a planning indicator recorded the day before the
+    incident.
+
+SHAPE FOR A ROUTINE RECORD:
+
+    Routine operating-system housekeeping, written automatically and not tied to
+    user action.

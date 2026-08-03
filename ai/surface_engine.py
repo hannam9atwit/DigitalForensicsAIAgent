@@ -128,24 +128,59 @@ class SurfaceEngine:
             context.append("ANALYSED FINDINGS — reason from these and cite their "
                            "IDs:\n" + _format_kb_entries(entries))
         context.append("FINDINGS INDEX:\n" + self._findings_index(case))
+        # Always present, even when no account was found: "who is the user?" is
+        # the question most likely to be answered from the model's prior rather
+        # than the evidence, so the evidence's own answer is always in the prompt.
+        context.append(_accounts_block(case))
         if incomplete:
             context.append("NOTE: the deep analysis is still in progress; some "
                            "artifacts may not be digested yet. Answer from what "
                            "is available and state plainly what has not been "
                            "analysed.")
         prompt = (f"QUESTION: {question}\n\n" + "\n\n".join(context))
-        full_prompt = f"{_PERSONA}\n\n{spec_text}\n\nTASK:\n{prompt}\n\nTEXT:"
+        full_prompt = (f"{_PERSONA}\n\n{format_library.GROUNDING}\n\n{spec_text}"
+                       f"\n\nTASK:\n{prompt}\n\nTEXT:")
 
-        text = self._call_llm(full_prompt)
+        # `prompt` is the entire case data the model was given, so it is also the
+        # yardstick for whether an answer's names were read or invented.
+        text = self._grounded_call(full_prompt, prompt)
         if text is None:
             return None
-        text = _strip_wrapping(text)
         self._last_entries = entries        # so _parse_answer can seed sources
         self._last_incomplete = incomplete
         if len(text.strip()) < 15:
             return None  # genuinely empty / broken response
 
         return self._parse_answer(text, case)
+
+    def _grounded_call(self, full_prompt: str, case_data: str) -> str | None:
+        """One answer, rejected and re-asked once if it names an account, file or
+        address that is absent from the case data it was given.
+
+        This is the last line of defence behind the neutral format specs and the
+        GROUNDING block: those stop the model being *taught* to invent, this
+        catches it when it invents anyway. A second offence is not returned at
+        all — for an examiner, no answer beats a confidently wrong one.
+        """
+        text = _strip_wrapping(self._call_llm(full_prompt) or "")
+        if not text:
+            return None
+
+        ungrounded = format_library.ungrounded_identifiers(text, case_data)
+        if not ungrounded:
+            return text
+
+        retry = (f"{full_prompt}\n\nYour previous answer was rejected: "
+                 f"{'; '.join(ungrounded)}. Every name, filename and address must "
+                 f"be copied from the case data above. Where the case data does "
+                 f"not establish one, say so instead of naming it. Rewrite the "
+                 f"answer.\nTEXT:")
+        text = _strip_wrapping(self._call_llm(retry) or "")
+        if not text:
+            return None
+        if format_library.ungrounded_identifiers(text, case_data):
+            return None
+        return text
 
     def _parse_answer(self, text: str, case: dict) -> dict:
         """Split the model's answer into paragraphs, an optional UNCERTAIN
@@ -254,7 +289,8 @@ class SurfaceEngine:
         if spec is None or not self.available():
             return fallback
 
-        full_prompt = f"{_PERSONA}\n\n{spec.prompt_text}\n\nTASK:\n{prompt}\n\nTEXT:"
+        full_prompt = (f"{_PERSONA}\n\n{format_library.GROUNDING}\n\n"
+                       f"{spec.prompt_text}\n\nTASK:\n{prompt}\n\nTEXT:")
 
         attempt_prompt = full_prompt
         for _ in range(1 + _RETRY_LIMIT):
@@ -263,13 +299,18 @@ class SurfaceEngine:
                 return fallback
 
             text = _strip_wrapping(text)
-            violations = spec.validate(text)
+            # Format violations and ungrounded identifiers are both grounds for a
+            # rewrite; an invented filename is as wrong as a broken structure, and
+            # falling back to the deterministic text is the honest outcome.
+            violations = spec.validate(text) + \
+                format_library.ungrounded_identifiers(text, prompt)
             if not violations:
                 return text
 
             attempt_prompt = (
-                f"{full_prompt}\n\nYour previous attempt violated the format: "
-                f"{'; '.join(violations)}. Rewrite it correctly. TEXT:"
+                f"{full_prompt}\n\nYour previous attempt was rejected: "
+                f"{'; '.join(violations)}. Rewrite it correctly, taking every "
+                f"name, filename and address from the case data above. TEXT:"
             )
 
         return fallback
@@ -397,6 +438,7 @@ class SurfaceEngine:
                         f"  - {artifact.get('name', '')} "
                         f"({artifact.get('kindLabel', '')}, {artifact.get('size', '')})")
 
+        lines.append(_accounts_block(case))
         return "\n".join(lines)
 
 
@@ -413,6 +455,14 @@ def _strip_wrapping(text: str) -> str:
     # surface leads with the content, and a merely-preambled answer is cleaned
     # rather than rejected. Same stripper the report path uses.
     return format_library.strip_leading_meta(cleaned)
+
+
+def _accounts_block(case):
+    """The accounts this case's events establish, or an explicit statement that
+    none was established. Derived from the events themselves (ai.accounts), never
+    generated, so it is the same answer the knowledge base stores."""
+    from ai import accounts as accounts_mod
+    return accounts_mod.brief(accounts_mod.extract(case.get("events", [])))
 
 
 def _format_kb_entries(entries):

@@ -21,9 +21,19 @@ Rules:
   data provided".
 - No jargon without an immediate everyday translation.
 - No hedging filler ("it could potentially possibly").
-- Concrete numbers over vague quantities when the data has them.
+- Use concrete numbers only where the supplied facts give them. If they give
+  none, describe what the artifact is and stop; never estimate a count, a date
+  or a name to make the sentence land better.
 
-EXAMPLE OF CORRECT OUTPUT:
-What the user searched for and visited, with timestamps — 2,318 records. It
-shows planning: searches about USB copying before the incident, and about
-permanent deletion after it.
+SHAPE OF A CORRECT NOTE — structure only. Each bracketed item marks a slot
+filled from the supplied facts; never write a bracketed placeholder itself, and
+never reuse a value from this example:
+
+    What the user searched for and visited, with timestamps, [COUNT] records.
+    It shows planning: searches about [TOPIC] before the incident, and about
+    [TOPIC] after it.
+
+SHAPE WHEN THE FACTS ARE THIN — equally correct:
+
+    A record of which programs ran on this machine and when. Nothing has been
+    parsed from it yet, so its bearing on the case is not yet established.

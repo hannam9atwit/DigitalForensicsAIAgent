@@ -45,6 +45,11 @@ TOPIC_FINDINGS_ASSESSMENT = "synthesis:findings_assessment"
 TOPIC_CASE_NARRATIVE = "synthesis:case_narrative"
 TOPIC_CASE_OVERVIEW = "synthesis:case_overview"
 
+# The accounts the evidence establishes. Written deterministically from the
+# parsed records (see ai/accounts.py), never generated, because "who is the
+# user?" is the question a model is most likely to answer from its prior.
+TOPIC_ACCOUNTS = "cross:accounts"
+
 _TOKEN = re.compile(r"[a-z0-9]+(?:[-_.][a-z0-9]+)*")
 _ID = re.compile(r"\b(?:EV|F)-\d+\b", re.IGNORECASE)
 

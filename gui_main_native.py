@@ -90,7 +90,11 @@ def _finish_launch(splash, health):
 
     show_wizard = not health.get("model_ready") and not _setup_was_skipped()
     splash.close()
-    window.show()
+    # Maximized, not fullscreen: the screens are laid out for the design's 1440
+    # width and the widest of them (Evidence) only just fits the 1100 minimum, so
+    # the app opens using whatever the display gives it while keeping the window
+    # chrome. resize() in the constructor still sets the restore-down geometry.
+    window.showMaximized()
 
     if show_wizard:
         from gui_v2.setup_wizard import SetupWizard
