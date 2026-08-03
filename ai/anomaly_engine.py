@@ -7,9 +7,15 @@ class AnomalyEngine:
     Produces anomalies (unusual patterns — not necessarily malicious).
     """
 
+    # Mirror of RuleEngine.MAX_FINDINGS: rare-extension detection emits one
+    # anomaly per matching file, which is unbounded on a large image, so the
+    # list is capped with an honest note the same way.
+    MAX_ANOMALIES = 500
+
     def run(self, disk_data, browser_data, unified_timeline):
 
         anomalies = []
+        self._cap_noted = False
 
         disk_events       = disk_data.get("events", [])
         browser_downloads = browser_data.get("downloads", [])
@@ -50,7 +56,9 @@ class AnomalyEngine:
                         "extension": ext,
                         "timestamp": e.get("timestamp"),
                         "reason":    "File extension appears only once in the dataset — unusual or uncommon file type.",
-                        "details":   e,
+                        # Paths/ids only — one anomaly per file here, so embedding
+                        # the whole event dict would multiply memory across the set.
+                        "details":   {"path": path, "artifact": e.get("artifact")},
                     })
 
         # ANOMALY 3 — Activity bursts (many events within a short window)
@@ -79,7 +87,10 @@ class AnomalyEngine:
                     "end":         start + window,
                     "event_count": count,
                     "reason":      f"{count} filesystem events occurred within {window} seconds — possible mass file creation or system initialization.",
-                    "details":     {"timestamps": timestamps[i:j]},
+                    # A dense burst can span thousands of timestamps; keep a
+                    # small sample plus the count rather than the whole slice.
+                    "details":     {"count": count,
+                                    "sample": timestamps[i:i + 10]},
                 })
                 i = j
             else:
@@ -97,5 +108,22 @@ class AnomalyEngine:
         return anomalies
 
     def _safe_append(self, lst, item):
-        if isinstance(item, dict):
+        """Append an anomaly, but never past MAX_ANOMALIES. On reaching the cap,
+        add a single honest note and drop the rest."""
+        if not isinstance(item, dict):
+            return
+        if len(lst) < self.MAX_ANOMALIES:
             lst.append(item)
+            return
+        if not self._cap_noted:
+            self._cap_noted = True
+            lst.append({
+                "type":     "anomalies_capped",
+                "severity": 1,
+                "reason": (
+                    f"The {self.MAX_ANOMALIES}-anomaly limit was reached; further "
+                    f"matches were suppressed so the report and memory stay "
+                    f"bounded on very large images."
+                ),
+                "details": {"limit": self.MAX_ANOMALIES},
+            })
